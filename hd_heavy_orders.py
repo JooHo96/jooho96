@@ -114,32 +114,71 @@ def get_html(api_key, rcept_no):
 
 # ── HTML 파싱 ─────────────────────────────────────────────────────────────
 
-def span_texts(html):
-    """모든 <span> 내 텍스트를 순서대로 추출"""
-    spans = re.findall(r'<span[^>]*>(.*?)</span>', html, re.DOTALL | re.IGNORECASE)
-    texts = []
-    for s in spans:
-        t = re.sub(r'<[^>]+>', '', s)
-        t = re.sub(r'[\xa0　]', ' ', t)
-        t = re.sub(r'\s+', ' ', t).strip()
-        if t:
-            texts.append(t)
-    return texts
+def get_pairs(html):
+    """
+    DART HTML에서 레이블→값 매핑 추출.
+    값은 class="xforms_input" span, 레이블은 직전 span.
+    """
+    spans = re.findall(r'<span([^>]*)>(.*?)</span>', html, re.DOTALL | re.IGNORECASE)
+    items = []
+    for attrs, content in spans:
+        text = re.sub(r'<[^>]+>', '', content)
+        text = re.sub(r'[\xa0　]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        is_val = 'xforms_input' in attrs
+        items.append((is_val, text))
+
+    pairs = {}
+    label_buf = []
+    for is_val, text in items:
+        if not is_val:
+            if text:
+                label_buf.append(text)
+        else:
+            if text and label_buf:
+                # 가장 가까운 레이블과 매핑
+                key = label_buf[-1]
+                pairs[key] = text
+                # 숫자값은 레이블 버퍼 비움, 텍스트값은 유지
+            label_buf = []
+
+    return pairs, items
 
 
-def find_after(texts, *labels, window=6):
-    """레이블 텍스트 이후 window 범위 내 첫 번째 의미있는 값 반환"""
+def find_val(pairs, *labels):
+    """매핑에서 레이블 키워드로 값 검색"""
     for label in labels:
-        for i, t in enumerate(texts):
-            if label in t:
-                for j in range(i + 1, min(i + 1 + window, len(texts))):
-                    v = texts[j]
-                    if v and v not in ('-', '해당없음', 'N/A', '없음', label) and len(v) < 200:
-                        # 다른 레이블 키워드면 스킵
-                        if any(kw in v for kw in ['판매·공급', '계약내역', '계약기간', '계약체결일']):
-                            break
-                        return v
+        for k, v in pairs.items():
+            if label in k and v and v not in ('-', '해당없음', 'N/A', '없음'):
+                return v
     return ""
+
+
+def find_dates_from_html(html):
+    """계약체결일자 시작/종료 날짜 추출 (xforms_input 날짜 패턴)"""
+    # xforms_input span 안의 날짜 형식 값만 추출
+    vals = re.findall(r'xforms_input[^>]*>([^<]*\d{4}-\d{2}-\d{2}[^<]*)<', html)
+    dates = []
+    for v in vals:
+        v = v.strip()
+        m = re.search(r'(\d{4}-\d{2}-\d{2})', v)
+        if m:
+            try:
+                dates.append(datetime.strptime(m.group(1), "%Y-%m-%d"))
+            except Exception:
+                pass
+    return dates
+
+
+def extract_exchange_rate(html):
+    """각주에서 'USD 1 = X,XXX.XX' 패턴으로 환율 추출"""
+    m = re.search(r'USD\s*1\s*[=＝]\s*([\d,]+\.?\d*)', html)
+    if m:
+        try:
+            return float(m.group(1).replace(',', ''))
+        except Exception:
+            pass
+    return None
 
 
 def detect_vessel(text):
@@ -194,11 +233,9 @@ def parse_date(text):
 
 
 def parse(html, rcept_dt, report_nm):
-    texts = span_texts(html)
-    full  = " ".join(texts)
+    pairs, items = get_pairs(html)
 
     is_amendment = "[기재정정]" in report_nm or "(정정)" in report_nm
-    clean_nm = re.sub(r'\[기재정정\]|\(정정\)', '', report_nm).strip()
 
     row = {
         "date":           None,
@@ -229,68 +266,62 @@ def parse(html, rcept_dt, report_nm):
         try:
             dt = datetime(int(rcept_dt[:4]), int(rcept_dt[4:6]), int(rcept_dt[6:]))
             row["date"] = dt
+            row["contract_date"] = dt
         except Exception:
             pass
 
-    # ── 시작일 / 종료일 (계약체결일자) ─────────────────────────────────
-    start_str = find_after(texts, "시작", "시작일", window=3)
-    end_str   = find_after(texts, "종료", "종료일", "완료", window=3)
+    # ── 시작일 / 종료일: xforms_input 날짜값 순서대로 추출 ────────────
+    dates = find_dates_from_html(html)
+    if len(dates) >= 1:
+        row["start_date"]    = dates[0]
+        row["contract_date"] = dates[0]
+        row["date"]          = dates[0]
+    if len(dates) >= 2:
+        row["end_date"]       = dates[1]
+        row["delivery_year"]  = dates[1].year
+        row["delivery_month"] = dates[1].month
+        row["delivery_date"]  = dates[1]
 
-    start_dt = parse_date(start_str)
-    end_dt   = parse_date(end_str)
-
-    if start_dt:
-        row["start_date"]    = start_dt
-        row["contract_date"] = start_dt   # 계약일 = 시작일
-        row["date"]          = start_dt
-    else:
-        row["contract_date"] = row["date"]
-
-    if end_dt:
-        row["end_date"]       = end_dt
-        row["delivery_year"]  = end_dt.year
-        row["delivery_month"] = end_dt.month
-        row["delivery_date"]  = end_dt
-
-    # ── 체결계약명 → 기타(E열) + 척수 힌트 ───────────────────────────
-    contract_nm = find_after(texts, "체결계약명", "계약명", window=3)
+    # ── 체결계약명 → 기타(E열) ────────────────────────────────────────
+    contract_nm = find_val(pairs, "체결계약명", "계약명")
     row["etc"] = contract_nm
 
     # 척수: "N척" 패턴 in 계약명
-    m_qty = re.search(r'(\d+)\s*척', contract_nm + " " + full[:1000])
+    m_qty = re.search(r'(\d+)\s*척', contract_nm)
     if m_qty:
         row["quantity"] = int(m_qty.group(1))
 
     # ── 계약상대방(선주) ───────────────────────────────────────────────
-    row["buyer"] = find_after(texts, "계약상대방", "거래상대방", "발주처", "매수인")
+    row["buyer"] = find_val(pairs, "계약상대방", "거래상대방", "발주처", "매수인")
 
     # ── 계약금액 ──────────────────────────────────────────────────────
-    amt_str = find_after(texts, "계약금액", "총계약금액", "공급금액")
+    amt_str = find_val(pairs, "계약금액", "총계약금액", "공급금액")
     if amt_str:
-        digits_only = re.sub(r'[^\d]', '', amt_str)
-        if digits_only:
-            if "달러" in amt_str or "USD" in amt_str.upper():
-                row["amount_usd_mil"] = parse_usd_to_mil(amt_str)
-            else:
-                row["amount_krw_bil"] = parse_krw_to_bil(amt_str)
+        if "달러" in amt_str or "USD" in amt_str.upper():
+            row["amount_usd_mil"] = parse_usd_to_mil(amt_str)
+        else:
+            row["amount_krw_bil"] = parse_krw_to_bil(amt_str)
+    else:
+        # xforms_input 중 큰 숫자값 (10자리 이상) 직접 추출
+        for is_val, text in items:
+            if is_val and re.match(r'^[\d,]+$', text.replace(' ', '')):
+                digits = re.sub(r'[^\d]', '', text)
+                if len(digits) >= 9:
+                    row["amount_krw_bil"] = parse_krw_to_bil(text)
+                    break
 
-    # ── 기준환율 (공시에 명시된 경우) ─────────────────────────────────
-    exr_str = find_after(texts, "기준환율", "적용환율", "환율", window=3)
-    if exr_str:
-        m_exr = re.search(r'[\d,]+\.?\d*', exr_str)
-        if m_exr:
-            try:
-                row["exchange_rate"] = float(m_exr.group().replace(',', ''))
-            except Exception:
-                pass
+    # ── 기준환율: 각주 "USD 1 = X,XXX.XX" 패턴 ──────────────────────
+    row["exchange_rate"] = extract_exchange_rate(html)
 
-    # 환율이 없고 KRW/USD 둘 다 있으면 역산
+    # 환율 없고 KRW/USD 둘 다 있으면 역산
     if not row["exchange_rate"] and row["amount_krw_bil"] and row["amount_usd_mil"]:
         row["exchange_rate"] = round(row["amount_krw_bil"] * 1000 / row["amount_usd_mil"], 1)
 
     # ── 선종 탐지 ─────────────────────────────────────────────────────
-    search_src = contract_nm + " " + row["buyer"] + " " + full[:4000]
-    vtype = detect_vessel(search_src)
+    search_src = contract_nm + " " + row["buyer"]
+    # xforms_input 텍스트 전체도 포함
+    all_vals = " ".join(t for is_v, t in items if is_v)
+    vtype = detect_vessel(search_src) or detect_vessel(all_vals[:3000])
     row["vessel_type"] = vtype
     if vtype in ("해양", "특수선", "선박용엔진"):
         row["vessel_category"] = vtype
