@@ -49,7 +49,7 @@ SHEET_NAME = "뉴스수주"
 DART_BASE  = "https://opendart.fss.or.kr/api"
 HISTORY_YEARS = 6   # 과거 몇 년치
 
-# 컬럼 인덱스 (1-based, openpyxl)
+# 컬럼 인덱스 (1-based, openpyxl) — 업로드 양식 기준
 COL = {
     "A":  1,   # =AC{row} 수식
     "B":  2,   # 회사
@@ -59,15 +59,20 @@ COL = {
     "F":  6,   # Type(선종)
     "G":  7,   # Name(선주)
     "H":  8,   # Size
-    "I":  9,   # 척수
-    "J":  10,  # GT
-    "K":  11,  # CGT
-    "L":  12,  # Flag
-    "M":  13,  # Built
-    "N":  14,  # 인도년
-    "O":  15,  # 인도월
-    "P":  16,  # Builder (=B{row})
+    "I":  9,   # Unit(척수)
+    "J":  10,  # Dwt
+    "K":  11,  # GT
+    "L":  12,  # CGT
+    "M":  13,  # Flag
+    "N":  14,  # Built(인도년)
+    "O":  15,  # Month(인도월)
+    "P":  16,  # Builder
     "Q":  17,  # Contract Date
+    "R":  18,  # Company
+    "S":  19,  # Group Company
+    "T":  20,  # Operator
+    "U":  21,  # Status
+    "V":  22,  # Alternative Fuel Types
     "Z":  26,  # Built date
     "AA": 27,  # 총계약금액(백만달러)
     "AB": 28,  # 총계약금액(십억원)
@@ -76,7 +81,7 @@ COL = {
     "AE": 31,  # 확정여부
     "AF": 32,  # 날짜 수식
     "AG": 33,  # 상선/특수선
-    "AH": 34,  # Clarksons
+    "AH": 34,  # Clarksons 반영여부
 }
 
 
@@ -350,10 +355,10 @@ def write_row(ws, row_num: int, data: dict):
     ws.cell(row=r, column=COL["F"]).value  = data["vessel_type"] or None
     ws.cell(row=r, column=COL["G"]).value  = data["buyer"] or None
     ws.cell(row=r, column=COL["H"]).value  = data["size"] or None
-    ws.cell(row=r, column=COL["I"]).value  = data["quantity"]
-    ws.cell(row=r, column=COL["N"]).value  = data["delivery_year"]
-    ws.cell(row=r, column=COL["O"]).value  = data["delivery_month"]
-    ws.cell(row=r, column=COL["P"]).value  = f"=B{r}"
+    ws.cell(row=r, column=COL["I"]).value  = data["quantity"]      # Unit(척수)
+    ws.cell(row=r, column=COL["N"]).value  = data["delivery_year"]  # Built(인도년)
+    ws.cell(row=r, column=COL["O"]).value  = data["delivery_month"] # Month(인도월)
+    ws.cell(row=r, column=COL["P"]).value  = data["company"]        # Builder = 회사명
     ws.cell(row=r, column=COL["Q"]).value  = data["contract_date"]
     ws.cell(row=r, column=COL["Z"]).value  = data["delivery_date"]
     ws.cell(row=r, column=COL["AA"]).value = data["amount_usd_mil"]
