@@ -313,22 +313,37 @@ def parse(html, rcept_dt, report_nm):
     # ── 기준환율: 각주 "USD 1 = X,XXX.XX" 패턴 ──────────────────────
     row["exchange_rate"] = extract_exchange_rate(html)
 
-    # 환율 없고 KRW/USD 둘 다 있으면 역산
+    # 환율 역산: KRW/USD 둘 다 있으면
     if not row["exchange_rate"] and row["amount_krw_bil"] and row["amount_usd_mil"]:
         row["exchange_rate"] = round(row["amount_krw_bil"] * 1000 / row["amount_usd_mil"], 1)
 
+    # ── KRW만 있고 환율 있으면 USD 역산 ──────────────────────────────
+    if row["amount_krw_bil"] and not row["amount_usd_mil"] and row["exchange_rate"]:
+        row["amount_usd_mil"] = round(row["amount_krw_bil"] * 1000 / row["exchange_rate"], 3)
+
+    # USD만 있고 환율 있으면 KRW 역산
+    if row["amount_usd_mil"] and not row["amount_krw_bil"] and row["exchange_rate"]:
+        row["amount_krw_bil"] = round(row["amount_usd_mil"] * row["exchange_rate"] / 1000, 3)
+
     # ── 선종 탐지 ─────────────────────────────────────────────────────
-    search_src = contract_nm + " " + row["buyer"]
-    # xforms_input 텍스트 전체도 포함
+    # 우선순위: 계약명 > 선주 > xforms_input 전체 > HTML 전체
     all_vals = " ".join(t for is_v, t in items if is_v)
-    vtype = detect_vessel(search_src) or detect_vessel(all_vals[:3000])
+    all_text = re.sub(r'<[^>]+>', ' ', html)  # HTML 태그 제거한 전체 텍스트
+
+    vtype = (detect_vessel(contract_nm)
+             or detect_vessel(row["buyer"])
+             or detect_vessel(all_vals)
+             or detect_vessel(all_text[:5000]))
     row["vessel_type"] = vtype
     if vtype in ("해양", "특수선", "선박용엔진"):
         row["vessel_category"] = vtype
 
-    # 척당 금액
+    # ── 척당 금액 ─────────────────────────────────────────────────────
     if row["quantity"] and row["amount_usd_mil"]:
         row["unit_price_usd"] = round(row["amount_usd_mil"] / row["quantity"], 3)
+    elif row["amount_usd_mil"] and not row["quantity"]:
+        # 척수 없으면 총액 = 척당금액으로 처리
+        row["unit_price_usd"] = row["amount_usd_mil"]
 
     return row
 
