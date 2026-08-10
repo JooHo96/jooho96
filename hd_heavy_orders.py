@@ -67,7 +67,6 @@ def get_list(api_key, bgn_de, end_de):
         try:
             r = requests.get(f"{DART_BASE}/list.json", params={
                 "crtfc_key": api_key, "corp_code": CORP_CODE,
-                "pblntf_detail_ty": "B002",
                 "bgn_de": bgn_de, "end_de": end_de,
                 "page_count": 100, "page_no": page,
             }, timeout=15).json()
@@ -76,7 +75,11 @@ def get_list(api_key, bgn_de, end_de):
             break
         if r.get("status") not in ("000",):
             break
-        results.extend(r.get("list", []))
+        # 단일판매·공급계약 관련 공시만 필터
+        for item in r.get("list", []):
+            nm = item.get("report_nm", "")
+            if "단일판매" in nm or "공급계약" in nm:
+                results.append(item)
         if page * 100 >= int(r.get("total_count", 0)):
             break
         page += 1
