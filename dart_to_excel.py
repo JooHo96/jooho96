@@ -88,20 +88,19 @@ COL = {
 # ── DART API 호출 ─────────────────────────────────────────────────────────
 
 def get_disclosure_list(api_key: str, corp_code: str, bgn_de: str, end_de: str) -> list:
-    """단일판매·공급계약(B002) 공시 목록 조회 (페이지네이션 포함)"""
+    """단일판매·공급계약 공시 목록 조회 (report_nm 키워드 필터링)"""
     url = f"{DART_BASE}/list.json"
     results = []
     page_no = 1
 
     while True:
         params = {
-            "crtfc_key":        api_key,
-            "corp_code":        corp_code,
-            "pblntf_detail_ty": "B002",
-            "bgn_de":           bgn_de,
-            "end_de":           end_de,
-            "page_count":       100,
-            "page_no":          page_no,
+            "crtfc_key":  api_key,
+            "corp_code":  corp_code,
+            "bgn_de":     bgn_de,
+            "end_de":     end_de,
+            "page_count": 100,
+            "page_no":    page_no,
         }
         try:
             r = requests.get(url, params=params, timeout=15)
@@ -110,14 +109,17 @@ def get_disclosure_list(api_key: str, corp_code: str, bgn_de: str, end_de: str) 
             print(f"  [오류] 목록 조회 실패: {e}")
             break
 
-        if data.get("status") == "013":  # 조회 결과 없음
+        if data.get("status") == "013":
             break
         if data.get("status") != "000":
             print(f"  [경고] DART 응답 상태: {data.get('status')} {data.get('message','')}")
             break
 
-        page_items = data.get("list", [])
-        results.extend(page_items)
+        # 단일판매·공급계약 관련 공시만 필터
+        for item in data.get("list", []):
+            nm = item.get("report_nm", "")
+            if "단일판매" in nm or "공급계약" in nm:
+                results.append(item)
 
         total = int(data.get("total_count", 0))
         if page_no * 100 >= total:
