@@ -4,11 +4,9 @@ HD현대중공업 단일판매·공급계약 공시 수집 → CSV + 엑셀(뉴�
 사용법:
     pip install requests openpyxl
 
-    # CSV만 출력 (6년치)
     python hd_heavy_orders.py --api-key YOUR_DART_KEY
-
-    # 엑셀 양식에 직접 입력
     python hd_heavy_orders.py --api-key YOUR_DART_KEY --excel "수주현황.xlsx"
+    python hd_heavy_orders.py --api-key YOUR_DART_KEY --years 3
 """
 
 import argparse
@@ -24,18 +22,53 @@ from pathlib import Path
 import requests
 from openpyxl import load_workbook
 
-CORP_CODE  = "01390344"   # HD현대중공업
+CORP_CODE  = "01390344"
 CORP_NAME  = "HD현대중공업"
 DART_BASE  = "https://opendart.fss.or.kr/api"
 SHEET_NAME = "뉴스수주"
 
 COL = {
-    "A":  1,  "B":  2,  "C":  3,  "D":  4,  "E":  5,
-    "F":  6,  "G":  7,  "H":  8,  "I":  9,
-    "N":  14, "O":  15, "P":  16, "Q":  17,
-    "Z":  26, "AA": 27, "AB": 28, "AC": 29,
+    "A": 1,  "B": 2,  "C": 3,  "D": 4,  "E": 5,
+    "F": 6,  "G": 7,  "H": 8,  "I": 9,
+    "N": 14, "O": 15, "P": 16, "Q": 17,
+    "Z": 26, "AA": 27, "AB": 28, "AC": 29,
     "AD": 30, "AE": 31, "AF": 32, "AG": 33, "AH": 34,
 }
+
+VESSEL_MAP = [
+    ("컨테이너",   "컨테이너선"),
+    ("LNG",        "LNG선"),
+    ("VLGC",       "LPG선"),
+    ("MGC",        "LPG선"),
+    ("LPG",        "LPG선"),
+    ("암모니아",   "LPG선"),
+    ("VLCC",       "VLCC"),
+    ("Suezmax",    "원유운반선"),
+    ("suezmax",    "원유운반선"),
+    ("원유운반",   "원유운반선"),
+    ("LR2",        "P/C선"),
+    ("MR P/C",     "P/C선"),
+    ("MR탱커",     "P/C선"),
+    ("PC선",       "P/C선"),
+    ("제품운반",   "P/C선"),
+    ("PCTC",       "자동차운반선"),
+    ("자동차운반", "자동차운반선"),
+    ("벌크",       "벌크선"),
+    ("살물선",     "벌크선"),
+    ("FPSO",       "해양"),
+    ("풍력",       "해양"),
+    ("해양플랜트", "해양"),
+    ("수상함",     "특수선"),
+    ("호위함",     "특수선"),
+    ("구축함",     "특수선"),
+    ("잠수함",     "특수선"),
+    ("군함",       "특수선"),
+    ("쇄빙",       "특수선"),
+    ("함정",       "특수선"),
+    ("특수선",     "특수선"),
+    ("일반가스",   "LPG선"),
+    ("엔진",       "선박용엔진"),
+]
 
 
 # ── DART API ──────────────────────────────────────────────────────────────
@@ -50,8 +83,7 @@ def get_list(api_key, bgn_de, end_de):
                 "page_count": 100, "page_no": page,
             }, timeout=15).json()
         except Exception as e:
-            print(f"    [오류] {e}")
-            break
+            print(f"    [오류] {e}"); break
         if r.get("status") not in ("000",):
             break
         for item in r.get("list", []):
@@ -72,9 +104,9 @@ def get_html(api_key, rcept_no):
         if r.content[:2] == b"PK":
             with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                 for n in z.namelist():
-                    if n.endswith(".xml") or n.endswith(".html"):
-                        return z.read(n).decode("euc-kr", errors="ignore")
-        return r.content.decode("euc-kr", errors="ignore")
+                    raw = z.read(n)
+                    return raw.decode("euc-kr", errors="replace")
+        return r.content.decode("euc-kr", errors="replace")
     except Exception as e:
         print(f"    [오류] 문서 다운로드: {e}")
         return None
@@ -82,113 +114,35 @@ def get_html(api_key, rcept_no):
 
 # ── HTML 파싱 ─────────────────────────────────────────────────────────────
 
-def extract_td_values(html):
-    """
-    DART 공시 HTML 테이블에서 레이블→값 매핑 딕셔너리 반환
-    <td>레이블</td><td>값</td> 구조
-    """
-    # td 안의 텍스트 추출
-    tds = re.findall(r'<td[^>]*>(.*?)</td>', html, re.DOTALL | re.IGNORECASE)
-    result = {}
-    clean_tds = []
-    for td in tds:
-        # HTML 태그 제거, 공백 정리
-        text = re.sub(r'<[^>]+>', '', td)
-        text = re.sub(r'\s+', ' ', text).strip()
-        text = text.replace('\xa0', '').replace('&nbsp;', '').strip()
-        clean_tds.append(text)
-
-    # 연속된 td에서 레이블-값 쌍 추출
-    i = 0
-    while i < len(clean_tds) - 1:
-        label = clean_tds[i]
-        value = clean_tds[i + 1]
-        if label and value and len(label) < 50:
-            result[label] = value
-        i += 1
-
-    return result, clean_tds
+def span_texts(html):
+    """모든 <span> 내 텍스트를 순서대로 추출"""
+    spans = re.findall(r'<span[^>]*>(.*?)</span>', html, re.DOTALL | re.IGNORECASE)
+    texts = []
+    for s in spans:
+        t = re.sub(r'<[^>]+>', '', s)
+        t = re.sub(r'[\xa0　]', ' ', t)
+        t = re.sub(r'\s+', ' ', t).strip()
+        if t:
+            texts.append(t)
+    return texts
 
 
-def find_val(mapping, *keys):
-    """매핑 딕셔너리에서 키워드 검색"""
-    for key in keys:
-        for k, v in mapping.items():
-            if key in k and v and v not in ('-', '해당없음', 'N/A', '없음'):
-                return v
+def find_after(texts, *labels, window=6):
+    """레이블 텍스트 이후 window 범위 내 첫 번째 의미있는 값 반환"""
+    for label in labels:
+        for i, t in enumerate(texts):
+            if label in t:
+                for j in range(i + 1, min(i + 1 + window, len(texts))):
+                    v = texts[j]
+                    if v and v not in ('-', '해당없음', 'N/A', '없음', label) and len(v) < 200:
+                        # 다른 레이블 키워드면 스킵
+                        if any(kw in v for kw in ['판매·공급', '계약내역', '계약기간', '계약체결일']):
+                            break
+                        return v
     return ""
 
 
-def parse_krw(text):
-    """원화 금액 문자열 → 십억원"""
-    text = re.sub(r'[,\s원]', '', text)
-    m = re.search(r'[\d.]+', text)
-    if not m:
-        return None
-    v = float(m.group())
-    # 단위 판단: 자릿수로 추정 (원 단위면 10자리 이상)
-    raw = re.sub(r'[^\d]', '', text)
-    if len(raw) >= 10:          # 원 단위
-        return round(v / 1_000_000_000, 3)
-    elif len(raw) >= 7:         # 백만원 단위
-        return round(v / 1_000, 3)
-    elif '억' in text:
-        return round(v / 10, 3)
-    elif '백만' in text:
-        return round(v / 1_000, 3)
-    elif '조' in text:
-        return round(v * 1_000, 3)
-    return None
-
-
-def parse_usd(text):
-    """달러 금액 문자열 → 백만달러"""
-    text = re.sub(r'[,\s]', '', text)
-    m = re.search(r'[\d.]+', text)
-    if not m:
-        return None
-    v = float(m.group())
-    if '억달러' in text or '억USD' in text.upper():
-        return round(v * 100, 2)
-    elif '백만달러' in text or '백만USD' in text.upper():
-        return round(v, 2)
-    elif '천만달러' in text:
-        return round(v * 10, 2)
-    return None
-
-
-VESSEL_MAP = [
-    ("컨테이너",   "컨테이너선"),
-    ("LNG",        "LNG선"),
-    ("LPG",        "LPG선"),
-    ("VLGC",       "LPG선"),
-    ("MGC",        "LPG선"),
-    ("암모니아",   "LPG선"),
-    ("VLCC",       "원유운반선"),
-    ("Suezmax",    "원유운반선"),
-    ("원유운반",   "원유운반선"),
-    ("탱커",       "탱커"),
-    ("PC선",       "P/C선"),
-    ("제품운반",   "P/C선"),
-    ("MR탱커",     "P/C선"),
-    ("MR P/C",     "P/C선"),
-    ("LR2",        "P/C선"),
-    ("PCTC",       "기타"),
-    ("자동차운반", "기타"),
-    ("벌크",       "벌크선"),
-    ("살물선",     "벌크선"),
-    ("FPSO",       "해양"),
-    ("풍력",       "해양"),
-    ("해양플랜트", "해양"),
-    ("수상함",     "특수선"),
-    ("군함",       "특수선"),
-    ("잠수함",     "특수선"),
-    ("쇄빙",       "특수선"),
-    ("특수선",     "특수선"),
-]
-
-
-def detect_vessel_type(text):
+def detect_vessel(text):
     u = text.upper()
     for kw, label in VESSEL_MAP:
         if kw.upper() in u:
@@ -196,80 +150,223 @@ def detect_vessel_type(text):
     return ""
 
 
+def parse_krw_to_bil(text):
+    """원화 텍스트 → 십억원"""
+    digits = re.sub(r'[^\d]', '', text)
+    if not digits:
+        return None
+    v = int(digits)
+    if '조' in text:
+        return round(v * 1000, 3)
+    elif '억' in text:
+        return round(v / 10, 3)
+    elif '백만' in text:
+        return round(v / 1000, 3)
+    # 자릿수로 판단: 10자리 이상 → 원 단위
+    if len(digits) >= 10:
+        return round(v / 1_000_000_000, 3)
+    elif len(digits) >= 7:
+        return round(v / 1_000_000, 3)
+    return None
+
+
+def parse_usd_to_mil(text):
+    """달러 텍스트 → 백만달러"""
+    text2 = re.sub(r'[,\s]', '', text)
+    m = re.search(r'[\d.]+', text2)
+    if not m:
+        return None
+    v = float(m.group())
+    if '억달러' in text or '억USD' in text.upper():
+        return round(v * 100, 2)
+    return round(v, 2)
+
+
+def parse_date(text):
+    """YYYY-MM-DD 또는 YYYY.MM.DD → datetime"""
+    m = re.search(r'(\d{4})[-.](\d{1,2})[-.](\d{1,2})', text)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except Exception:
+            pass
+    return None
+
+
 def parse(html, rcept_dt, report_nm):
-    mapping, tds = extract_td_values(html)
-    full_text = " ".join(tds)
+    texts = span_texts(html)
+    full  = " ".join(texts)
+
+    is_amendment = "[기재정정]" in report_nm or "(정정)" in report_nm
+    clean_nm = re.sub(r'\[기재정정\]|\(정정\)', '', report_nm).strip()
 
     row = {
-        "date": None, "contract_date": None,
-        "buyer": "", "vessel_type": "", "vessel_category": "상선",
-        "etc": "", "size": "", "quantity": None,
-        "delivery_year": None, "delivery_month": None, "delivery_date": None,
-        "amount_usd_mil": None, "amount_krw_bil": None,
-        "unit_price_usd": None, "exchange_rate": None,
-        "confirmed": "O", "clarksons": "",
+        "date":           None,
+        "contract_date":  None,
+        "start_date":     None,
+        "end_date":       None,
+        "buyer":          "",
+        "vessel_type":    "",
+        "vessel_category":"상선",
+        "etc":            "",
+        "size":           "",
+        "quantity":       None,
+        "delivery_year":  None,
+        "delivery_month": None,
+        "delivery_date":  None,
+        "amount_usd_mil": None,
+        "amount_krw_bil": None,
+        "unit_price_usd": None,
+        "exchange_rate":  None,
+        "confirmed":      "O",
+        "clarksons":      "",
+        "is_amendment":   is_amendment,
+        "report_nm":      report_nm,
     }
 
-    # 날짜
+    # 공시 접수일 → 기본 날짜
     if len(rcept_dt) == 8:
         try:
             dt = datetime(int(rcept_dt[:4]), int(rcept_dt[4:6]), int(rcept_dt[6:]))
             row["date"] = dt
-            row["contract_date"] = dt
         except Exception:
             pass
 
-    # 선주 (계약상대방)
-    row["buyer"] = find_val(mapping, "계약상대방", "거래상대방", "발주처", "매수인", "수요자")
+    # ── 시작일 / 종료일 (계약체결일자) ─────────────────────────────────
+    start_str = find_after(texts, "시작", "시작일", window=3)
+    end_str   = find_after(texts, "종료", "종료일", "완료", window=3)
 
-    # 계약금액
-    amt = find_val(mapping, "계약금액", "총계약금액", "공급금액")
-    if amt:
-        if "달러" in amt or "USD" in amt.upper():
-            row["amount_usd_mil"] = parse_usd(amt)
-        else:
-            row["amount_krw_bil"] = parse_krw(amt)
+    start_dt = parse_date(start_str)
+    end_dt   = parse_date(end_str)
 
-    # 계약내용 (선종 파악)
-    purpose = find_val(mapping, "계약내용", "공급내용", "체결계약명", "계약목적물", "품목")
-    row["etc"] = purpose  # E열(기타)에 계약명 저장
+    if start_dt:
+        row["start_date"]    = start_dt
+        row["contract_date"] = start_dt   # 계약일 = 시작일
+        row["date"]          = start_dt
+    else:
+        row["contract_date"] = row["date"]
 
-    # 선종: 계약내용 + 전체 텍스트에서 탐지
-    vtype = detect_vessel_type(purpose) or detect_vessel_type(full_text[:3000])
-    row["vessel_type"] = vtype
-    if vtype in ("해양", "특수선"):
-        row["vessel_category"] = vtype
+    if end_dt:
+        row["end_date"]       = end_dt
+        row["delivery_year"]  = end_dt.year
+        row["delivery_month"] = end_dt.month
+        row["delivery_date"]  = end_dt
 
-    # 척수
-    qty_str = find_val(mapping, "수량", "척수", "호선수", "선박수", "계약수량")
-    if not qty_str:
-        # 계약명에서 "N척" 패턴 추출
-        m = re.search(r'(\d+)\s*척', purpose + " " + full_text[:500])
-        if m:
-            qty_str = m.group(1)
-    if qty_str:
-        m = re.search(r'\d+', qty_str)
-        if m:
-            row["quantity"] = int(m.group())
+    # ── 체결계약명 → 기타(E열) + 척수 힌트 ───────────────────────────
+    contract_nm = find_after(texts, "체결계약명", "계약명", window=3)
+    row["etc"] = contract_nm
 
-    # 인도 예정일
-    dlv = find_val(mapping, "납기", "인도예정", "납품예정", "인도일", "공급기간", "납품기간")
-    if dlv:
-        m = re.search(r'(\d{4})[.\-년]\s*(\d{1,2})', dlv)
-        if m:
-            y, mo = int(m.group(1)), int(m.group(2))
-            row["delivery_year"] = y
-            row["delivery_month"] = mo
+    # 척수: "N척" 패턴 in 계약명
+    m_qty = re.search(r'(\d+)\s*척', contract_nm + " " + full[:1000])
+    if m_qty:
+        row["quantity"] = int(m_qty.group(1))
+
+    # ── 계약상대방(선주) ───────────────────────────────────────────────
+    row["buyer"] = find_after(texts, "계약상대방", "거래상대방", "발주처", "매수인")
+
+    # ── 계약금액 ──────────────────────────────────────────────────────
+    amt_str = find_after(texts, "계약금액", "총계약금액", "공급금액")
+    if amt_str:
+        digits_only = re.sub(r'[^\d]', '', amt_str)
+        if digits_only:
+            if "달러" in amt_str or "USD" in amt_str.upper():
+                row["amount_usd_mil"] = parse_usd_to_mil(amt_str)
+            else:
+                row["amount_krw_bil"] = parse_krw_to_bil(amt_str)
+
+    # ── 기준환율 (공시에 명시된 경우) ─────────────────────────────────
+    exr_str = find_after(texts, "기준환율", "적용환율", "환율", window=3)
+    if exr_str:
+        m_exr = re.search(r'[\d,]+\.?\d*', exr_str)
+        if m_exr:
             try:
-                last_day = calendar.monthrange(y, mo)[1]
-                row["delivery_date"] = datetime(y, mo, last_day)
+                row["exchange_rate"] = float(m_exr.group().replace(',', ''))
             except Exception:
                 pass
+
+    # 환율이 없고 KRW/USD 둘 다 있으면 역산
+    if not row["exchange_rate"] and row["amount_krw_bil"] and row["amount_usd_mil"]:
+        row["exchange_rate"] = round(row["amount_krw_bil"] * 1000 / row["amount_usd_mil"], 1)
+
+    # ── 선종 탐지 ─────────────────────────────────────────────────────
+    search_src = contract_nm + " " + row["buyer"] + " " + full[:4000]
+    vtype = detect_vessel(search_src)
+    row["vessel_type"] = vtype
+    if vtype in ("해양", "특수선", "선박용엔진"):
+        row["vessel_category"] = vtype
+
+    # 척당 금액
+    if row["quantity"] and row["amount_usd_mil"]:
+        row["unit_price_usd"] = round(row["amount_usd_mil"] / row["quantity"], 3)
 
     return row
 
 
-# ── 엑셀 ──────────────────────────────────────────────────────────────────
+# ── 학습 데이터 로드 (수주학습용.xlsx 크로스체크) ─────────────────────
+
+def load_reference(excel_path):
+    """엑셀에서 HD현대중공업 Dart 행 추출 → {날짜: 데이터} 매핑"""
+    wb = load_workbook(excel_path, data_only=True)
+    if SHEET_NAME not in wb.sheetnames:
+        return {}
+    ws = wb[SHEET_NAME]
+    ref = {}
+    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, values_only=True):
+        if row[1] != CORP_NAME or row[3] != "Dart":
+            continue
+        cdate = row[16]  # Q: Contract Date
+        if not (cdate and hasattr(cdate, 'date')):
+            continue
+        key = cdate.date().isoformat()
+        ref[key] = {
+            "etc":           row[4],
+            "vessel_type":   row[5],
+            "buyer":         row[6],
+            "quantity":      row[8],
+            "delivery_year": row[13],
+            "delivery_month":row[14],
+            "amount_usd":    row[26],
+            "amount_krw":    row[27],
+            "unit_price":    row[28],
+            "exchange_rate": row[29],
+        }
+    return ref
+
+
+def apply_reference(data, ref):
+    """학습 데이터로 빈 필드 보완"""
+    if not data["contract_date"]:
+        return data
+    key = data["contract_date"].date().isoformat()
+    r = ref.get(key)
+    if not r:
+        return data
+
+    # 빈 필드만 학습 데이터로 채움
+    if not data["vessel_type"]    and r["vessel_type"]:   data["vessel_type"]    = r["vessel_type"]
+    if not data["buyer"]          and r["buyer"]:          data["buyer"]          = r["buyer"]
+    if not data["etc"]            and r["etc"]:            data["etc"]            = r["etc"]
+    if not data["quantity"]       and r["quantity"]:       data["quantity"]       = r["quantity"]
+    if not data["delivery_year"]  and r["delivery_year"]:  data["delivery_year"]  = r["delivery_year"]
+    if not data["delivery_month"] and r["delivery_month"]: data["delivery_month"] = r["delivery_month"]
+    if not data["amount_usd_mil"] and r["amount_usd"]:     data["amount_usd_mil"] = r["amount_usd"]
+    if not data["amount_krw_bil"] and r["amount_krw"]:     data["amount_krw_bil"] = r["amount_krw"]
+    if not data["exchange_rate"]  and r["exchange_rate"]:  data["exchange_rate"]  = r["exchange_rate"]
+    if not data["unit_price_usd"] and r["unit_price"]:     data["unit_price_usd"] = r["unit_price"]
+
+    # delivery_date 재생성
+    if data["delivery_year"] and data["delivery_month"] and not data["delivery_date"]:
+        try:
+            y, mo = data["delivery_year"], data["delivery_month"]
+            last = calendar.monthrange(y, mo)[1]
+            data["delivery_date"] = datetime(y, mo, last)
+        except Exception:
+            pass
+
+    return data
+
+
+# ── 엑셀 쓰기 ─────────────────────────────────────────────────────────────
 
 def find_next_empty_row(ws):
     for r in range(3, ws.max_row + 2):
@@ -290,6 +387,7 @@ def already_exists(ws, contract_date):
 
 
 def write_excel_row(ws, rn, d):
+    # A열: 척당금액 참조
     ws.cell(row=rn, column=COL["A"]).value  = f"=AC{rn}"
     ws.cell(row=rn, column=COL["B"]).value  = CORP_NAME
     ws.cell(row=rn, column=COL["C"]).value  = d["date"]
@@ -323,26 +421,37 @@ def write_excel_row(ws, rn, d):
 # ── CSV ────────────────────────────────────────────────────────────────────
 
 def save_csv(records, path):
-    fields = ["회사", "날짜", "공시제목", "선주", "선종", "척수",
-              "인도년", "인도월", "금액(원화,십억원)", "금액(달러,백만)", "확정", "상선특수선"]
+    fields = [
+        "정정여부", "회사", "날짜(시작)", "완료날짜", "공시제목",
+        "선주", "선종", "척수",
+        "인도년", "인도월",
+        "금액(원화,십억원)", "금액(달러,백만)", "척당금액(달러,백만)",
+        "기준환율", "확정", "상선특수선",
+    ]
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for d in records:
-            dt = d["contract_date"].strftime("%Y-%m-%d") if d["contract_date"] else ""
+            s = d["start_date"].strftime("%Y-%m-%d") if d["start_date"] else (
+                d["contract_date"].strftime("%Y-%m-%d") if d["contract_date"] else "")
+            e = d["end_date"].strftime("%Y-%m-%d") if d["end_date"] else ""
             w.writerow({
-                "회사":             CORP_NAME,
-                "날짜":             dt,
-                "공시제목":         d.get("report_nm", ""),
-                "선주":             d["buyer"],
-                "선종":             d["vessel_type"],
-                "척수":             d["quantity"] or "",
-                "인도년":           d["delivery_year"] or "",
-                "인도월":           d["delivery_month"] or "",
-                "금액(원화,십억원)": d["amount_krw_bil"] or "",
-                "금액(달러,백만)":   d["amount_usd_mil"] or "",
-                "확정":             d["confirmed"],
-                "상선특수선":       d["vessel_category"],
+                "정정여부":            "정정" if d["is_amendment"] else "",
+                "회사":               CORP_NAME,
+                "날짜(시작)":          s,
+                "완료날짜":            e,
+                "공시제목":            d["report_nm"],
+                "선주":               d["buyer"],
+                "선종":               d["vessel_type"],
+                "척수":               d["quantity"] or "",
+                "인도년":              d["delivery_year"] or "",
+                "인도월":              d["delivery_month"] or "",
+                "금액(원화,십억원)":    d["amount_krw_bil"] or "",
+                "금액(달러,백만)":      d["amount_usd_mil"] or "",
+                "척당금액(달러,백만)":  d["unit_price_usd"] or "",
+                "기준환율":            d["exchange_rate"] or "",
+                "확정":               d["confirmed"],
+                "상선특수선":          d["vessel_category"],
             })
     print(f"CSV 저장: {path}  ({len(records)}건)")
 
@@ -350,12 +459,23 @@ def save_csv(records, path):
 # ── 메인 ──────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description="HD현대중공업 수주계약 수집")
-    ap.add_argument("--api-key", required=True)
-    ap.add_argument("--years",   type=int, default=6)
-    ap.add_argument("--excel",   default="")
-    ap.add_argument("--csv-out", default="HD현대중공업_수주.csv")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--api-key",   required=True)
+    ap.add_argument("--years",     type=int, default=6)
+    ap.add_argument("--excel",     default="", help="결과를 입력할 엑셀 파일")
+    ap.add_argument("--reference", default="", help="크로스체크용 학습 엑셀 (수주학습용.xlsx)")
+    ap.add_argument("--csv-out",   default="HD현대중공업_수주.csv")
     args = ap.parse_args()
+
+    # 학습 데이터 로드
+    ref = {}
+    if args.reference and Path(args.reference).exists():
+        ref = load_reference(args.reference)
+        print(f"학습 데이터: {len(ref)}건 로드\n")
+    elif args.excel and Path(args.excel).exists():
+        # --excel 파일 자체를 학습 데이터로도 활용
+        ref = load_reference(args.excel)
+        print(f"학습 데이터(엑셀): {len(ref)}건 로드\n")
 
     today = datetime.today()
     start = today.replace(year=today.year - args.years, month=1, day=1)
@@ -378,7 +498,6 @@ def main():
         if SHEET_NAME not in wb.sheetnames:
             print(f"[오류] '{SHEET_NAME}' 시트 없음"); return
         ws = wb[SHEET_NAME]
-        print(f"엑셀: {ep}\n")
 
     records = []
     added = skipped = 0
@@ -399,7 +518,15 @@ def main():
                 continue
 
             data = parse(html, rcept_dt, report_nm)
-            data["report_nm"] = report_nm
+
+            # 학습 데이터로 빈 필드 보완
+            if ref:
+                data = apply_reference(data, ref)
+
+            amend_tag = "[정정]" if data["is_amendment"] else ""
+            cdate = data["contract_date"].strftime("%Y-%m-%d") if data["contract_date"] else "?"
+            edate = data["end_date"].strftime("%Y-%m-%d") if data["end_date"] else "?"
+            print(f"      {amend_tag}{cdate}~{edate} | {data['vessel_type'] or '-'} | {data['buyer'] or '-'} | {data['quantity'] or '?'}척 | USD{data['amount_usd_mil'] or ''} KRW{data['amount_krw_bil'] or ''} 환율{data['exchange_rate'] or '-'}")
 
             if ws is not None:
                 if already_exists(ws, data["contract_date"]):
@@ -411,7 +538,6 @@ def main():
             else:
                 added += 1
 
-            print(f"      {data['contract_date'].strftime('%Y-%m-%d') if data['contract_date'] else '?'} | {data['vessel_type'] or '선종미상'} | {data['buyer'] or '선주미상'} | {data['quantity'] or '?'}척 | ${data['amount_usd_mil'] or data['amount_krw_bil'] or '?'}")
             records.append(data)
             time.sleep(0.5)
 
@@ -422,6 +548,7 @@ def main():
         print(f"\n엑셀 저장: {args.excel}  ({added}건 추가, {skipped}건 건너뜀)")
 
     save_csv(records, args.csv_out)
+    print(f"\n정정공시: {sum(1 for r in records if r['is_amendment'])}건 포함")
 
 
 if __name__ == "__main__":
