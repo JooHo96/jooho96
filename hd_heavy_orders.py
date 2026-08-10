@@ -27,7 +27,7 @@ from pathlib import Path
 import requests
 from openpyxl import load_workbook
 
-CORP_CODE  = "00164788"   # HD현대중공업
+CORP_CODE  = "01390344"   # HD현대중공업
 CORP_NAME  = "HD현대중공업"
 DART_BASE  = "https://opendart.fss.or.kr/api"
 SHEET_NAME = "뉴스수주"
