@@ -517,6 +517,55 @@ def write_excel_row(ws, rn, d):
     ws.cell(row=rn, column=COL["AH"]).value = d["clarksons"] or None
 
 
+# ── XLSX 저장 (시트 여러 개 유지 가능) ────────────────────────────────────
+
+def save_xlsx(records, path):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "DART수주"
+
+    headers = [
+        "정정여부", "회사", "날짜(시작)", "완료날짜", "공시제목",
+        "선주", "선종", "척수",
+        "인도년", "인도월",
+        "금액(원화,십억원)", "금액(달러,백만)", "척당금액(달러,백만)",
+        "기준환율", "확정", "상선특수선",
+    ]
+    # 헤더 행
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="DDEEFF")
+        cell.alignment = Alignment(horizontal="center")
+
+    for ri, d in enumerate(records, 2):
+        s = d["start_date"].strftime("%Y-%m-%d") if d["start_date"] else (
+            d["contract_date"].strftime("%Y-%m-%d") if d["contract_date"] else "")
+        e = d["end_date"].strftime("%Y-%m-%d") if d["end_date"] else ""
+        row_vals = [
+            "정정" if d["is_amendment"] else "",
+            CORP_NAME, s, e, d["report_nm"],
+            d["buyer"], d["vessel_type"], d["quantity"] or "",
+            d["delivery_year"] or "", d["delivery_month"] or "",
+            d["amount_krw_bil"] or "", d["amount_usd_mil"] or "",
+            d["unit_price_usd"] or "", d["exchange_rate"] or "",
+            d["confirmed"], d["vessel_category"],
+        ]
+        for ci, v in enumerate(row_vals, 1):
+            ws.cell(row=ri, column=ci, value=v)
+
+    # 열 너비 자동 조정
+    col_widths = [8, 14, 12, 12, 40, 20, 12, 6, 8, 8, 16, 14, 16, 10, 6, 10]
+    for ci, w in enumerate(col_widths, 1):
+        ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+
+    wb.save(path)
+    print(f"XLSX 저장: {path}  ({len(records)}건)")
+
+
 # ── CSV ────────────────────────────────────────────────────────────────────
 
 def save_csv(records, path, encoding="utf-8-sig"):
@@ -564,7 +613,8 @@ def main():
     ap.add_argument("--year",      type=int, default=0, help="특정 연도만 수집 (예: --year 2025)")
     ap.add_argument("--excel",     default="", help="결과를 입력할 엑셀 파일")
     ap.add_argument("--reference", default="", help="크로스체크용 학습 엑셀 (수주학습용.xlsx)")
-    ap.add_argument("--csv-out",   default="HD현대중공업_수주.csv")
+    ap.add_argument("--csv-out",   default="", help="CSV 저장 경로 (생략 시 저장 안 함)")
+    ap.add_argument("--xlsx-out",  default="HD현대중공업_수주.xlsx", help="XLSX 저장 경로")
     ap.add_argument("--encoding",  default="euc-kr", help="CSV 인코딩 (기본: euc-kr)")
     ap.add_argument("--debug",     action="store_true", help="공란 원인 분석 출력")
     args = ap.parse_args()
@@ -672,7 +722,10 @@ def main():
         wb.save(args.excel)
         print(f"\n엑셀 저장: {args.excel}  ({added}건 추가, {skipped}건 건너뜀)")
 
-    save_csv(records, args.csv_out, args.encoding)
+    if args.xlsx_out:
+        save_xlsx(records, args.xlsx_out)
+    if args.csv_out:
+        save_csv(records, args.csv_out, args.encoding)
     print(f"\n정정공시: {sum(1 for r in records if r['is_amendment'])}건 포함")
 
 
