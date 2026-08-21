@@ -119,6 +119,35 @@ VESSEL_MAP = [
 
 # ── DART API ──────────────────────────────────────────────────────────────
 
+def lookup_corp_codes(api_key, names):
+    """corpCode.xml에서 기업명으로 corp_code 검색. 결과 출력 후 반환."""
+    import xml.etree.ElementTree as ET
+    try:
+        r = requests.get(f"{DART_BASE}/corpCode.xml",
+                         params={"crtfc_key": api_key}, timeout=60)
+        if r.content[:2] != b"PK":
+            print(f"[오류] corpCode.xml 응답 이상: {r.text[:200]}")
+            return {}
+        import zipfile, io as _io
+        with zipfile.ZipFile(_io.BytesIO(r.content)) as z:
+            raw = z.read(z.namelist()[0])
+        root = ET.fromstring(raw)
+        result = {}
+        for item in root.findall("list"):
+            corp_name = item.findtext("corp_name", "")
+            corp_code = item.findtext("corp_code", "")
+            stock_code = item.findtext("stock_code", "")
+            for tgt in names:
+                if tgt in corp_name:
+                    if corp_name not in result:
+                        result[corp_name] = (corp_code, stock_code)
+                        print(f"  {corp_name:25s}  corp_code={corp_code}  stock={stock_code}")
+        return result
+    except Exception as e:
+        print(f"[오류] corp_code 조회 실패: {e}")
+        return {}
+
+
 def get_list(api_key, bgn_de, end_de, corp_code=None):
     if corp_code is None:
         corp_code = list(COMPANIES.values())[0]
@@ -992,7 +1021,16 @@ def main():
     ap.add_argument("--xlsx-out",     default="조선사_수주.xlsx", help="XLSX 저장 경로")
     ap.add_argument("--encoding",     default="euc-kr", help="CSV 인코딩 (기본: euc-kr)")
     ap.add_argument("--debug",        action="store_true", help="공란 원인 분석 출력")
+    ap.add_argument("--lookup-corps", action="store_true",
+                    help="DART에서 기업 corp_code 검색 후 종료 (코드 확인용)")
     args = ap.parse_args()
+
+    # corp_code 조회 모드
+    if args.lookup_corps:
+        search_names = args.companies if args.companies else list(COMPANIES.keys())
+        print(f"DART corp_code 검색: {search_names}")
+        lookup_corp_codes(args.api_key, search_names)
+        return
 
     # 학습 데이터 로드
     ref = {}
