@@ -36,28 +36,54 @@ COL = {
 }
 
 VESSEL_MAP = [
+    # 컨테이너
     ("컨테이너",   "컨테이너선"),
+    # LNG
     ("LNG",        "LNG선"),
+    ("LNGC",       "LNG선"),
+    # LPG / 가스
     ("VLGC",       "LPG선"),
+    ("VLAC",       "LPG선"),   # Very Large Ammonia Carrier
     ("MGC",        "LPG선"),
     ("LPG",        "LPG선"),
     ("암모니아",   "LPG선"),
-    ("VLCC",       "VLCC"),
+    ("일반가스",   "LPG선"),
+    ("가스운반",   "LPG선"),
+    # 원유운반
+    ("VLCC",       "원유운반선"),
+    ("ULCC",       "원유운반선"),
     ("Suezmax",    "원유운반선"),
     ("suezmax",    "원유운반선"),
+    ("Aframax",    "원유운반선"),
+    ("aframax",    "원유운반선"),
     ("원유운반",   "원유운반선"),
+    ("탱커",       "원유운반선"),
+    # P/C선
     ("LR2",        "P/C선"),
+    ("LR1",        "P/C선"),
     ("MR P/C",     "P/C선"),
     ("MR탱커",     "P/C선"),
     ("PC선",       "P/C선"),
+    ("P/C",        "P/C선"),
     ("제품운반",   "P/C선"),
+    ("석유화학",   "P/C선"),
+    # 자동차운반
     ("PCTC",       "자동차운반선"),
     ("자동차운반", "자동차운반선"),
+    ("PCC",        "자동차운반선"),
+    # 벌크
     ("벌크",       "벌크선"),
     ("살물선",     "벌크선"),
+    ("Capesize",   "벌크선"),
+    ("Panamax",    "벌크선"),
+    ("Handymax",   "벌크선"),
+    # 해양
     ("FPSO",       "해양"),
     ("풍력",       "해양"),
     ("해양플랜트", "해양"),
+    ("드릴십",     "해양"),
+    ("drillship",  "해양"),
+    # 특수선
     ("수상함",     "특수선"),
     ("호위함",     "특수선"),
     ("구축함",     "특수선"),
@@ -66,8 +92,10 @@ VESSEL_MAP = [
     ("쇄빙",       "특수선"),
     ("함정",       "특수선"),
     ("특수선",     "특수선"),
-    ("일반가스",   "LPG선"),
+    ("빙위",       "특수선"),
+    # 엔진
     ("엔진",       "선박용엔진"),
+    ("engine",     "선박용엔진"),
 ]
 
 
@@ -283,13 +311,36 @@ def parse(html, rcept_dt, report_nm):
         row["delivery_date"]  = dates[1]
 
     # ── 체결계약명 → 기타(E열) ────────────────────────────────────────
-    contract_nm = find_val(pairs, "체결계약명", "계약명")
+    contract_nm = find_val(pairs, "체결계약명", "계약명", "계약건명", "공급물품", "거래내용")
     row["etc"] = contract_nm
 
-    # 척수: "N척" 패턴 in 계약명
-    m_qty = re.search(r'(\d+)\s*척', contract_nm)
-    if m_qty:
-        row["quantity"] = int(m_qty.group(1))
+    # ── 척수 추출 (우선순위: pairs 레이블 > 계약명 > 전체 xforms_input > HTML)
+    qty_from_label = find_val(pairs, "계약수량", "선박수", "납품수량", "수량", "척수", "건조척수")
+    if qty_from_label:
+        m_qty = re.search(r'(\d+)', qty_from_label)
+        if m_qty:
+            row["quantity"] = int(m_qty.group(1))
+
+    if not row["quantity"]:
+        # 계약명에서 "N척" 패턴
+        m_qty = re.search(r'(\d+)\s*척', contract_nm)
+        if m_qty:
+            row["quantity"] = int(m_qty.group(1))
+
+    if not row["quantity"]:
+        # 전체 xforms_input 값에서 "N척" 패턴
+        for is_v, text in items:
+            if is_v:
+                m_qty = re.search(r'(\d+)\s*척', text)
+                if m_qty:
+                    row["quantity"] = int(m_qty.group(1))
+                    break
+
+    if not row["quantity"]:
+        # HTML 전체에서 "N척" 패턴 (최후 수단)
+        m_qty = re.search(r'(\d+)\s*척', html[:8000])
+        if m_qty:
+            row["quantity"] = int(m_qty.group(1))
 
     # ── 계약상대방(선주) ───────────────────────────────────────────────
     row["buyer"] = find_val(pairs, "계약상대방", "거래상대방", "발주처", "매수인")
@@ -326,14 +377,16 @@ def parse(html, rcept_dt, report_nm):
         row["amount_krw_bil"] = round(row["amount_usd_mil"] * row["exchange_rate"] / 1000, 3)
 
     # ── 선종 탐지 ─────────────────────────────────────────────────────
-    # 우선순위: 계약명 > 선주 > xforms_input 전체 > HTML 전체
+    # pairs에서 선종/선박종류 레이블 직접 검색
+    vessel_label_val = find_val(pairs, "선종", "선박종류", "선박유형", "물품명", "선박명", "공급물품", "거래내용")
     all_vals = " ".join(t for is_v, t in items if is_v)
-    all_text = re.sub(r'<[^>]+>', ' ', html)  # HTML 태그 제거한 전체 텍스트
+    all_text = re.sub(r'<[^>]+>', ' ', html)
 
-    vtype = (detect_vessel(contract_nm)
+    vtype = (detect_vessel(vessel_label_val)
+             or detect_vessel(contract_nm)
              or detect_vessel(row["buyer"])
              or detect_vessel(all_vals)
-             or detect_vessel(all_text[:5000]))
+             or detect_vessel(all_text[:8000]))
     row["vessel_type"] = vtype
     if vtype in ("해양", "특수선", "선박용엔진"):
         row["vessel_category"] = vtype
