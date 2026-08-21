@@ -133,25 +133,12 @@ def get_list(api_key, bgn_de, end_de):
 
 
 def _decode_html(raw_bytes):
-    """HTML bytes → 문자열: charset 메타태그로 인코딩 자동 감지"""
-    # UTF-8 BOM
+    """UTF-8 BOM 우선, UTF-8 strict 시도, 실패 시 cp949"""
     if raw_bytes.startswith(b'\xef\xbb\xbf'):
         return raw_bytes[3:].decode('utf-8', errors='replace')
-    # meta charset 태그 추출
-    m = re.search(rb'charset\s*=\s*["\']?\s*([\w_-]+)', raw_bytes[:4000], re.IGNORECASE)
-    if m:
-        enc = m.group(1).decode('ascii', errors='ignore').strip().lower()
-        enc = enc.replace('ks_c_5601-1987', 'cp949').replace('ks_c_5601', 'cp949')
-        enc = enc or 'cp949'
-    else:
-        # 감지 실패 시 UTF-8 시도 후 cp949 폴백
-        try:
-            return raw_bytes.decode('utf-8')
-        except UnicodeDecodeError:
-            enc = 'cp949'
     try:
-        return raw_bytes.decode(enc, errors='replace')
-    except (LookupError, UnicodeDecodeError):
+        return raw_bytes.decode('utf-8')
+    except UnicodeDecodeError:
         return raw_bytes.decode('cp949', errors='replace')
 
 
