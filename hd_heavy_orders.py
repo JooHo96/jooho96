@@ -998,6 +998,22 @@ def _collect_one_company(api_key, corp_name, corp_code, ranges, ref, args):
                             if is_v and txt:
                                 print(f"            val: {txt!r}")
 
+            # --debug: 정정공시 테이블 구조 덤프
+            if getattr(args, 'debug', False) and data["is_amendment"]:
+                print(f"        ▶ [정정 디버그] rcept_no={rcept_no}")
+                print(f"        ▶ parse_amendment_table 결과 ({len(data.get('amend_fields') or [])}행):")
+                for f_, b_, a_ in (data.get("amend_fields") or []):
+                    print(f"            항목={f_!r}")
+                    print(f"              전={b_!r}")
+                    print(f"              후={a_!r}")
+                print(f"        ▶ 원본 <tr> 셀 덤프 (날짜 포함 행만):")
+                for row_html in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE):
+                    cells = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html,
+                                       re.DOTALL | re.IGNORECASE)
+                    texts = [_cell_text(c) for c in cells]
+                    if any(re.search(r'\d{4}-\d{2}-\d{2}', t) for t in texts):
+                        print(f"            [{len(cells)}칸] {texts}")
+
             # 정정공시: amend_fields의 after 날짜로 start/end_date 확정
             if data["is_amendment"]:
                 for field, before, after in (data.get("amend_fields") or []):
