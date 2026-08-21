@@ -998,6 +998,34 @@ def _collect_one_company(api_key, corp_name, corp_code, ranges, ref, args):
                             if is_v and txt:
                                 print(f"            val: {txt!r}")
 
+            # 정정공시: amend_fields의 after 날짜로 start/end_date 확정
+            if data["is_amendment"]:
+                for field, before, after in (data.get("amend_fields") or []):
+                    if any(k in field for k in ["계약기간", "납품기간", "이행기간"]):
+                        ds = re.findall(r'\d{4}-\d{2}-\d{2}', after)
+                        if len(ds) >= 2:
+                            try: data["start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                            except: pass
+                            try: data["end_date"]   = datetime.strptime(ds[1], "%Y-%m-%d")
+                            except: pass
+                        elif len(ds) == 1:
+                            try: data["end_date"]   = datetime.strptime(ds[0], "%Y-%m-%d")
+                            except: pass
+                    elif any(k in field for k in ["종료일", "완료일", "납기"]):
+                        ds = re.findall(r'\d{4}-\d{2}-\d{2}', after)
+                        if ds:
+                            try: data["end_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                            except: pass
+                    elif any(k in field for k in ["시작일", "착수일"]):
+                        ds = re.findall(r'\d{4}-\d{2}-\d{2}', after)
+                        if ds:
+                            try: data["start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                            except: pass
+
+            # --amendments-only: 정정공시만 저장
+            if getattr(args, 'amendments_only', False) and not data["is_amendment"]:
+                continue
+
             records.append(data)
             time.sleep(0.5)
 
@@ -1020,7 +1048,8 @@ def main():
     ap.add_argument("--csv-out",      default="", help="CSV 저장 경로 (생략 시 저장 안 함)")
     ap.add_argument("--xlsx-out",     default="조선사_수주.xlsx", help="XLSX 저장 경로")
     ap.add_argument("--encoding",     default="euc-kr", help="CSV 인코딩 (기본: euc-kr)")
-    ap.add_argument("--debug",        action="store_true", help="공란 원인 분석 출력")
+    ap.add_argument("--debug",           action="store_true", help="공란 원인 분석 출력")
+    ap.add_argument("--amendments-only", action="store_true", help="정정공시만 저장")
     ap.add_argument("--lookup-corps", action="store_true",
                     help="DART에서 기업 corp_code 검색 후 종료 (코드 확인용)")
     args = ap.parse_args()
