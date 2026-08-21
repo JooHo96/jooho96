@@ -455,7 +455,7 @@ def parse(html, rcept_dt, report_nm):
                     try: row["orig_start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
                     except: pass
             # 계약상대방 변경
-            elif any(k in fl for k in ["계약상대", "거래상대", "발주처"]):
+            elif any(k in fl for k in ["계약상대", "거래상대", "발주처", "상대방"]):
                 if not row["buyer"]:
                     row["buyer"] = after  # 변경 후 값이 현재 값
             # 계약금액 변경
@@ -528,7 +528,7 @@ def parse(html, rcept_dt, report_nm):
         v = re.sub(r'\s+', ' ', v).strip().rstrip('.')
         return v if len(v) >= 2 else ""
 
-    buyer = find_val(pairs, "계약상대방", "거래상대방", "발주처", "매수인",
+    buyer = find_val(pairs, "계약상대", "계약상대방", "거래상대방", "발주처", "매수인",
                      "계약 상대방", "상대방", "거래처", "수요자", "납품처")
     buyer = _clean_buyer(buyer) if buyer else ""
 
