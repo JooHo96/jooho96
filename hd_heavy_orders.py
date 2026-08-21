@@ -561,10 +561,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--api-key",   required=True)
     ap.add_argument("--years",     type=int, default=6)
+    ap.add_argument("--year",      type=int, default=0, help="특정 연도만 수집 (예: --year 2025)")
     ap.add_argument("--excel",     default="", help="결과를 입력할 엑셀 파일")
     ap.add_argument("--reference", default="", help="크로스체크용 학습 엑셀 (수주학습용.xlsx)")
     ap.add_argument("--csv-out",   default="HD현대중공업_수주.csv")
-    ap.add_argument("--encoding",  default="utf-8-sig", help="CSV 인코딩 (기본: utf-8-sig, 한글깨짐시: euc-kr)")
+    ap.add_argument("--encoding",  default="euc-kr", help="CSV 인코딩 (기본: euc-kr)")
+    ap.add_argument("--debug",     action="store_true", help="공란 원인 분석 출력")
     args = ap.parse_args()
 
     # 학습 데이터 로드
@@ -573,20 +575,26 @@ def main():
         ref = load_reference(args.reference)
         print(f"학습 데이터: {len(ref)}건 로드\n")
     elif args.excel and Path(args.excel).exists():
-        # --excel 파일 자체를 학습 데이터로도 활용
         ref = load_reference(args.excel)
         print(f"학습 데이터(엑셀): {len(ref)}건 로드\n")
 
     today = datetime.today()
-    start = today.replace(year=today.year - args.years, month=1, day=1)
 
-    ranges, cur = [], start
-    while cur < today:
-        nxt = min(cur + timedelta(days=364), today)
-        ranges.append((cur.strftime("%Y%m%d"), nxt.strftime("%Y%m%d")))
-        cur = nxt + timedelta(days=1)
+    # --year 옵션: 해당 연도 1월1일~12월31일만
+    if args.year:
+        start = datetime(args.year, 1, 1)
+        end   = datetime(args.year, 12, 31)
+        ranges = [(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))]
+        print(f"HD현대중공업 수주 수집 ({args.year}년)")
+    else:
+        start = today.replace(year=today.year - args.years, month=1, day=1)
+        ranges, cur = [], start
+        while cur < today:
+            nxt = min(cur + timedelta(days=364), today)
+            ranges.append((cur.strftime("%Y%m%d"), nxt.strftime("%Y%m%d")))
+            cur = nxt + timedelta(days=1)
+        print(f"HD현대중공업 수주 수집 ({start.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')})")
 
-    print(f"HD현대중공업 수주 수집 ({start.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')})")
     print(f"조회 구간: {len(ranges)}개\n")
 
     wb, ws = None, None
@@ -627,6 +635,23 @@ def main():
             cdate = data["contract_date"].strftime("%Y-%m-%d") if data["contract_date"] else "?"
             edate = data["end_date"].strftime("%Y-%m-%d") if data["end_date"] else "?"
             print(f"      {amend_tag}{cdate}~{edate} | {data['vessel_type'] or '-'} | {data['buyer'] or '-'} | {data['quantity'] or '?'}척 | USD{data['amount_usd_mil'] or ''} KRW{data['amount_krw_bil'] or ''} 환율{data['exchange_rate'] or '-'}")
+
+            # --debug: 공란 원인 분석
+            if getattr(args, 'debug', False):
+                blanks = []
+                if not data['vessel_type']:   blanks.append("선종")
+                if not data['quantity']:       blanks.append("척수")
+                if not data['amount_usd_mil'] and not data['amount_krw_bil']:
+                                               blanks.append("금액")
+                if not data['exchange_rate']:  blanks.append("환율")
+                if not data['buyer']:          blanks.append("선주")
+                if blanks:
+                    pairs, items2 = get_pairs(html)
+                    print(f"        ▶ 공란필드: {', '.join(blanks)}")
+                    print(f"        ▶ 계약명: {data['etc'] or '(없음)'}")
+                    print(f"        ▶ 파싱된 레이블-값 쌍:")
+                    for k, v in list(pairs.items())[:20]:
+                        print(f"            [{k}] = {v}")
 
             if ws is not None:
                 if already_exists(ws, data["contract_date"]):
