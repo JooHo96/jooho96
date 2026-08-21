@@ -282,21 +282,62 @@ def parse_date(text):
 
 def find_original_dates(html):
     """기재정정 공시에서 기존(변경 전) 날짜 추출.
-    DART 정정공시 HTML은 '기존' 컬럼(일반 텍스트)과 '변경' 컬럼(xforms_input) 구조.
-    xforms_input 이 아닌 일반 td/span 안의 날짜 패턴을 추출.
+    1) '기존' 키워드 주변에서 날짜 범위 탐색
+    2) td 셀 안에 날짜 2개 이상인 셀 탐색 (기존 계약기간)
+    3) 변경 후(xforms_input) 날짜와 다른 날짜만 수집
     """
-    # xforms_input 이 아닌 위치의 날짜 패턴
+    # xforms_input(변경 후) 날짜를 제거한 plain HTML
     plain = re.sub(r'<span[^>]*xforms_input[^>]*>.*?</span>', '', html, flags=re.DOTALL)
     plain_text = re.sub(r'<[^>]+>', ' ', plain)
+
+    new_dates = set()
+    for m in re.finditer(r'(\d{4}-\d{2}-\d{2})', re.sub(r'<[^>]+>', ' ',
+            re.sub(r'.*?<body', '', html, flags=re.DOTALL))):
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d")
+            if 2000 <= d.year <= 2040:
+                new_dates.add(d)
+        except Exception:
+            pass
+    # 변경 후 날짜에서 plain_text에 있는 날짜를 제거해 기존 날짜만 남김
+    # (xforms_input 제거 후 남은 날짜가 진짜 "기존" 날짜)
+
+    # 1) '기존' 키워드 뒤 날짜 우선 탐색
+    m = re.search(
+        r'기존[^0-9]{0,80}(\d{4}-\d{2}-\d{2})[^0-9]{0,30}(\d{4}-\d{2}-\d{2})',
+        plain_text)
+    if m:
+        try:
+            d1 = datetime.strptime(m.group(1), "%Y-%m-%d")
+            d2 = datetime.strptime(m.group(2), "%Y-%m-%d")
+            if 2000 <= d1.year <= 2040 and 2000 <= d2.year <= 2040:
+                return [d1, d2]
+        except Exception:
+            pass
+
+    # 2) plain td 셀 안에 날짜 쌍이 있는 셀 탐색
+    for cell_html in re.findall(r'<td[^>]*>(.*?)</td>', plain, re.DOTALL):
+        cell_text = re.sub(r'<[^>]+>', ' ', cell_html)
+        ds = re.findall(r'(\d{4}-\d{2}-\d{2})', cell_text)
+        if len(ds) >= 2:
+            try:
+                d1 = datetime.strptime(ds[0], "%Y-%m-%d")
+                d2 = datetime.strptime(ds[1], "%Y-%m-%d")
+                if 2000 <= d1.year <= 2040 and 2000 <= d2.year <= 2040:
+                    return [d1, d2]
+            except Exception:
+                pass
+
+    # 3) fallback: plain_text 전체에서 날짜 수집, xforms 날짜와 다른 것만
     dates = []
     for m in re.finditer(r'(\d{4}-\d{2}-\d{2})', plain_text):
         try:
             d = datetime.strptime(m.group(1), "%Y-%m-%d")
-            if 2000 <= d.year <= 2040:
+            if 2000 <= d.year <= 2040 and d not in new_dates:
                 dates.append(d)
         except Exception:
             pass
-    return dates
+    return dates[:2]
 
 
 def parse(html, rcept_dt, report_nm):
@@ -406,7 +447,20 @@ def parse(html, rcept_dt, report_nm):
                 break
 
     # ── 계약상대방(선주) ───────────────────────────────────────────────
-    row["buyer"] = find_val(pairs, "계약상대방", "거래상대방", "발주처", "매수인")
+    buyer = find_val(pairs, "계약상대방", "거래상대방", "발주처", "매수인",
+                     "계약 상대방", "상대방", "거래처", "수요자", "납품처")
+    if not buyer:
+        # pairs에 없으면 HTML에서 레이블 다음 td 값 탐색
+        all_text_plain = re.sub(r'<[^>]+>', ' ', html)
+        for label in ["계약상대방", "거래상대방", "발주처"]:
+            m_b = re.search(
+                rf'{re.escape(label)}\s*[^\n]{{0,30}}\n?\s*([^\n<]{{2,100}})', all_text_plain)
+            if m_b:
+                val = m_b.group(1).strip().rstrip('.')
+                if val and val not in ('-', '해당없음', 'N/A', '없음', ''):
+                    buyer = val
+                    break
+    row["buyer"] = buyer
 
     # ── 계약금액 ──────────────────────────────────────────────────────
     amt_str = find_val(pairs, "계약금액", "총계약금액", "공급금액")
