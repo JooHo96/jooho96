@@ -260,33 +260,55 @@ def parse_date(text):
     return None
 
 
+def find_original_dates(html):
+    """기재정정 공시에서 기존(변경 전) 날짜 추출.
+    DART 정정공시 HTML은 '기존' 컬럼(일반 텍스트)과 '변경' 컬럼(xforms_input) 구조.
+    xforms_input 이 아닌 일반 td/span 안의 날짜 패턴을 추출.
+    """
+    # xforms_input 이 아닌 위치의 날짜 패턴
+    plain = re.sub(r'<span[^>]*xforms_input[^>]*>.*?</span>', '', html, flags=re.DOTALL)
+    plain_text = re.sub(r'<[^>]+>', ' ', plain)
+    dates = []
+    for m in re.finditer(r'(\d{4}-\d{2}-\d{2})', plain_text):
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d")
+            if 2000 <= d.year <= 2040:
+                dates.append(d)
+        except Exception:
+            pass
+    return dates
+
+
 def parse(html, rcept_dt, report_nm):
     pairs, items = get_pairs(html)
 
     is_amendment = "[기재정정]" in report_nm or "(정정)" in report_nm
 
     row = {
-        "date":           None,
-        "contract_date":  None,
-        "start_date":     None,
-        "end_date":       None,
-        "buyer":          "",
-        "vessel_type":    "",
-        "vessel_category":"상선",
-        "etc":            "",
-        "size":           "",
-        "quantity":       None,
-        "delivery_year":  None,
-        "delivery_month": None,
-        "delivery_date":  None,
-        "amount_usd_mil": None,
-        "amount_krw_bil": None,
-        "unit_price_usd": None,
-        "exchange_rate":  None,
-        "confirmed":      "O",
-        "clarksons":      "",
-        "is_amendment":   is_amendment,
-        "report_nm":      report_nm,
+        "date":               None,
+        "contract_date":      None,
+        "start_date":         None,
+        "end_date":           None,
+        "orig_start_date":    None,   # 정정 전 시작일
+        "orig_end_date":      None,   # 정정 전 종료일
+        "buyer":              "",
+        "vessel_type":        "",
+        "vessel_category":    "상선",
+        "contract_nm":        "",     # 체결계약명 (선종/척수 단서)
+        "etc":                "",
+        "size":               "",
+        "quantity":           None,
+        "delivery_year":      None,
+        "delivery_month":     None,
+        "delivery_date":      None,
+        "amount_usd_mil":     None,
+        "amount_krw_bil":     None,
+        "unit_price_usd":     None,
+        "exchange_rate":      None,
+        "confirmed":          "O",
+        "clarksons":          "",
+        "is_amendment":       is_amendment,
+        "report_nm":          report_nm,
     }
 
     # 공시 접수일 → 기본 날짜
@@ -310,8 +332,17 @@ def parse(html, rcept_dt, report_nm):
         row["delivery_month"] = dates[1].month
         row["delivery_date"]  = dates[1]
 
-    # ── 체결계약명 → 기타(E열) ────────────────────────────────────────
+    # ── 기재정정: 변경 전 날짜 추출 ──────────────────────────────────
+    if is_amendment:
+        orig_dates = find_original_dates(html)
+        if len(orig_dates) >= 1:
+            row["orig_start_date"] = orig_dates[0]
+        if len(orig_dates) >= 2:
+            row["orig_end_date"] = orig_dates[1]
+
+    # ── 체결계약명 ────────────────────────────────────────────────────
     contract_nm = find_val(pairs, "체결계약명", "계약명", "계약건명", "공급물품", "거래내용")
+    row["contract_nm"] = contract_nm
     row["etc"] = contract_nm
 
     # ── 척수 추출 (우선순위: pairs 레이블 > 계약명 > 전체 xforms_input > HTML)
@@ -528,37 +559,64 @@ def save_xlsx(records, path):
     ws.title = "DART수주"
 
     headers = [
-        "정정여부", "회사", "날짜(시작)", "완료날짜", "공시제목",
-        "선주", "선종", "척수",
-        "인도년", "인도월",
-        "금액(원화,십억원)", "금액(달러,백만)", "척당금액(달러,백만)",
-        "기준환율", "확정", "상선특수선",
+        "정정여부",       # A
+        "회사",           # B
+        "수주일자",       # C  (contract_date)
+        "계약시작일",     # D  (start_date)
+        "계약종료일",     # E  (end_date)
+        "정정전시작일",   # F  (orig_start_date, 정정공시만)
+        "정정전종료일",   # G  (orig_end_date, 정정공시만)
+        "체결계약명",     # H  (선종/척수/납품품목 단서)
+        "계약상대",       # I  (buyer)
+        "선종",           # J
+        "척수",           # K
+        "인도년",         # L
+        "인도월",         # M
+        "금액(원화,십억원)",    # N
+        "금액(달러,백만)",      # O
+        "척당금액(달러,백만)",  # P
+        "기준환율",       # Q
+        "확정",           # R
+        "상선특수선",     # S
+        "공시제목",       # T
     ]
-    # 헤더 행
+
     for ci, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=ci, value=h)
         cell.font = Font(bold=True)
         cell.fill = PatternFill("solid", fgColor="DDEEFF")
         cell.alignment = Alignment(horizontal="center")
 
+    def fmt(d):
+        return d.strftime("%Y-%m-%d") if d else ""
+
     for ri, d in enumerate(records, 2):
-        s = d["start_date"].strftime("%Y-%m-%d") if d["start_date"] else (
-            d["contract_date"].strftime("%Y-%m-%d") if d["contract_date"] else "")
-        e = d["end_date"].strftime("%Y-%m-%d") if d["end_date"] else ""
         row_vals = [
             "정정" if d["is_amendment"] else "",
-            CORP_NAME, s, e, d["report_nm"],
-            d["buyer"], d["vessel_type"], d["quantity"] or "",
-            d["delivery_year"] or "", d["delivery_month"] or "",
-            d["amount_krw_bil"] or "", d["amount_usd_mil"] or "",
-            d["unit_price_usd"] or "", d["exchange_rate"] or "",
-            d["confirmed"], d["vessel_category"],
+            CORP_NAME,
+            fmt(d.get("contract_date")),
+            fmt(d.get("start_date")),
+            fmt(d.get("end_date")),
+            fmt(d.get("orig_start_date")),
+            fmt(d.get("orig_end_date")),
+            d.get("contract_nm") or d.get("etc") or "",
+            d.get("buyer") or "",
+            d.get("vessel_type") or "",
+            d.get("quantity") or "",
+            d.get("delivery_year") or "",
+            d.get("delivery_month") or "",
+            d.get("amount_krw_bil") or "",
+            d.get("amount_usd_mil") or "",
+            d.get("unit_price_usd") or "",
+            d.get("exchange_rate") or "",
+            d.get("confirmed") or "",
+            d.get("vessel_category") or "",
+            d.get("report_nm") or "",
         ]
         for ci, v in enumerate(row_vals, 1):
             ws.cell(row=ri, column=ci, value=v)
 
-    # 열 너비 자동 조정
-    col_widths = [8, 14, 12, 12, 40, 20, 12, 6, 8, 8, 16, 14, 16, 10, 6, 10]
+    col_widths = [8, 14, 12, 12, 12, 12, 12, 45, 22, 12, 6, 8, 8, 16, 14, 16, 10, 6, 10, 45]
     for ci, w in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
 
@@ -568,38 +626,44 @@ def save_xlsx(records, path):
 
 # ── CSV ────────────────────────────────────────────────────────────────────
 
-def save_csv(records, path, encoding="utf-8-sig"):
+def save_csv(records, path, encoding="euc-kr"):
     fields = [
-        "정정여부", "회사", "날짜(시작)", "완료날짜", "공시제목",
-        "선주", "선종", "척수",
+        "정정여부", "회사", "수주일자", "계약시작일", "계약종료일",
+        "정정전시작일", "정정전종료일",
+        "체결계약명", "계약상대", "선종", "척수",
         "인도년", "인도월",
         "금액(원화,십억원)", "금액(달러,백만)", "척당금액(달러,백만)",
-        "기준환율", "확정", "상선특수선",
+        "기준환율", "확정", "상선특수선", "공시제목",
     ]
+
+    def fmt(d):
+        return d.strftime("%Y-%m-%d") if d else ""
+
     with open(path, "w", newline="", encoding=encoding) as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for d in records:
-            s = d["start_date"].strftime("%Y-%m-%d") if d["start_date"] else (
-                d["contract_date"].strftime("%Y-%m-%d") if d["contract_date"] else "")
-            e = d["end_date"].strftime("%Y-%m-%d") if d["end_date"] else ""
             w.writerow({
-                "정정여부":            "정정" if d["is_amendment"] else "",
-                "회사":               CORP_NAME,
-                "날짜(시작)":          s,
-                "완료날짜":            e,
-                "공시제목":            d["report_nm"],
-                "선주":               d["buyer"],
-                "선종":               d["vessel_type"],
-                "척수":               d["quantity"] or "",
-                "인도년":              d["delivery_year"] or "",
-                "인도월":              d["delivery_month"] or "",
-                "금액(원화,십억원)":    d["amount_krw_bil"] or "",
-                "금액(달러,백만)":      d["amount_usd_mil"] or "",
-                "척당금액(달러,백만)":  d["unit_price_usd"] or "",
-                "기준환율":            d["exchange_rate"] or "",
-                "확정":               d["confirmed"],
-                "상선특수선":          d["vessel_category"],
+                "정정여부":         "정정" if d["is_amendment"] else "",
+                "회사":            CORP_NAME,
+                "수주일자":         fmt(d.get("contract_date")),
+                "계약시작일":       fmt(d.get("start_date")),
+                "계약종료일":       fmt(d.get("end_date")),
+                "정정전시작일":     fmt(d.get("orig_start_date")),
+                "정정전종료일":     fmt(d.get("orig_end_date")),
+                "체결계약명":       d.get("contract_nm") or d.get("etc") or "",
+                "계약상대":         d.get("buyer") or "",
+                "선종":            d.get("vessel_type") or "",
+                "척수":            d.get("quantity") or "",
+                "인도년":           d.get("delivery_year") or "",
+                "인도월":           d.get("delivery_month") or "",
+                "금액(원화,십억원)": d.get("amount_krw_bil") or "",
+                "금액(달러,백만)":   d.get("amount_usd_mil") or "",
+                "척당금액(달러,백만)": d.get("unit_price_usd") or "",
+                "기준환율":         d.get("exchange_rate") or "",
+                "확정":            d.get("confirmed") or "",
+                "상선특수선":       d.get("vessel_category") or "",
+                "공시제목":         d.get("report_nm") or "",
             })
     print(f"CSV 저장: {path}  ({len(records)}건)")
 
