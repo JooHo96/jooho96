@@ -519,7 +519,7 @@ def write_excel_row(ws, rn, d):
 
 # ── CSV ────────────────────────────────────────────────────────────────────
 
-def save_csv(records, path):
+def save_csv(records, path, encoding="utf-8-sig"):
     fields = [
         "정정여부", "회사", "날짜(시작)", "완료날짜", "공시제목",
         "선주", "선종", "척수",
@@ -527,7 +527,7 @@ def save_csv(records, path):
         "금액(원화,십억원)", "금액(달러,백만)", "척당금액(달러,백만)",
         "기준환율", "확정", "상선특수선",
     ]
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+    with open(path, "w", newline="", encoding=encoding) as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for d in records:
@@ -564,6 +564,7 @@ def main():
     ap.add_argument("--excel",     default="", help="결과를 입력할 엑셀 파일")
     ap.add_argument("--reference", default="", help="크로스체크용 학습 엑셀 (수주학습용.xlsx)")
     ap.add_argument("--csv-out",   default="HD현대중공업_수주.csv")
+    ap.add_argument("--encoding",  default="utf-8-sig", help="CSV 인코딩 (기본: utf-8-sig, 한글깨짐시: euc-kr)")
     args = ap.parse_args()
 
     # 학습 데이터 로드
@@ -646,7 +647,7 @@ def main():
         wb.save(args.excel)
         print(f"\n엑셀 저장: {args.excel}  ({added}건 추가, {skipped}건 건너뜀)")
 
-    save_csv(records, args.csv_out)
+    save_csv(records, args.csv_out, args.encoding)
     print(f"\n정정공시: {sum(1 for r in records if r['is_amendment'])}건 포함")
 
 
