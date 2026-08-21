@@ -79,6 +79,7 @@ VESSEL_MAP = [
     ("Handymax",   "벌크선"),
     # 해양 (구체적인 것 먼저, 마지막에 단독 "해양" 폴백)
     ("FPSO",       "해양"),
+    ("FSRU",       "해양"),
     ("풍력",       "해양"),
     ("해양플랜트", "해양"),
     ("해양프로젝트","해양"),
@@ -133,13 +134,15 @@ def get_list(api_key, bgn_de, end_de):
 
 
 def _decode_html(raw_bytes):
-    """UTF-8 BOM 우선, UTF-8 strict 시도, 실패 시 cp949"""
+    """UTF-8 BOM 우선, 대체문자 비율로 UTF-8/CP949 자동 선택"""
     if raw_bytes.startswith(b'\xef\xbb\xbf'):
         return raw_bytes[3:].decode('utf-8', errors='replace')
-    try:
-        return raw_bytes.decode('utf-8')
-    except UnicodeDecodeError:
-        return raw_bytes.decode('cp949', errors='replace')
+    # UTF-8로 우선 디코딩 후 대체문자(U+FFFD) 비율 확인
+    utf8_text = raw_bytes.decode('utf-8', errors='replace')
+    ratio = utf8_text.count('�') / max(len(utf8_text), 1)
+    if ratio < 0.01:   # 1% 미만이면 UTF-8로 확정
+        return utf8_text
+    return raw_bytes.decode('cp949', errors='replace')
 
 
 def get_html(api_key, rcept_no):
