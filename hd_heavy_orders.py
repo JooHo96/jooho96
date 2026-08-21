@@ -971,9 +971,38 @@ def main():
                     pairs, items2 = get_pairs(html)
                     print(f"        ▶ 공란필드: {', '.join(blanks)}")
                     print(f"        ▶ 계약명: {data['etc'] or '(없음)'}")
-                    print(f"        ▶ 파싱된 레이블-값 쌍:")
-                    for k, v in list(pairs.items())[:20]:
+                    print(f"        ▶ 파싱된 레이블-값 쌍 (전체):")
+                    for k, v in pairs.items():
                         print(f"            [{k}] = {v}")
+                    if "선주" in blanks:
+                        print(f"        ▶ [BUYER 디버그] pairs 키 전체:")
+                        for k in pairs.keys():
+                            print(f"            키: {repr(k)}")
+                        # td 기반 탐색 시도 결과 출력
+                        print(f"        ▶ [BUYER 디버그] td 기반 탐색:")
+                        for lbl in ["계약상대방", "거래상대방", "발주처", "매수인"]:
+                            pat = (rf'>{re.escape(lbl)}</td>\s*'
+                                   r'(?:<td[^>]*>)(.*?)(?:</td>)')
+                            m_b = re.search(pat, html, re.DOTALL | re.IGNORECASE)
+                            if m_b:
+                                print(f"            td[{lbl}] → {_cell_text(m_b.group(1))!r}")
+                            else:
+                                print(f"            td[{lbl}] → 없음")
+                        # HTML plain text에서 레이블 탐색
+                        print(f"        ▶ [BUYER 디버그] HTML plaintext 검색:")
+                        all_plain = re.sub(r'<[^>]+>', '\n', html)
+                        for lbl in ["계약상대방", "거래상대방", "발주처"]:
+                            m_b = re.search(
+                                rf'{re.escape(lbl)}\s*\n\s*([^\n]{{2,120}})', all_plain)
+                            if m_b:
+                                print(f"            plain[{lbl}] → {m_b.group(1).strip()!r}")
+                            else:
+                                print(f"            plain[{lbl}] → 없음")
+                        # xforms_input 값 중 회사명 후보
+                        print(f"        ▶ [BUYER 디버그] xforms_input 값 전체:")
+                        for is_v, txt in items2:
+                            if is_v and txt:
+                                print(f"            val: {txt!r}")
 
             if ws is not None:
                 if already_exists(ws, data["contract_date"]):
