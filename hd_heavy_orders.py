@@ -202,6 +202,35 @@ def find_val(pairs, *labels):
     return ""
 
 
+def _cell_text(html_frag):
+    t = re.sub(r'<[^>]+>', ' ', html_frag)
+    t = re.sub(r'[\xa0　]', ' ', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+
+def parse_amendment_table(html):
+    """정정공시 '항목|기존|정정' 테이블 파싱.
+    Returns list of (field_name, before_text, after_text)
+    """
+    SKIP = {'항목', '기존', '정정', '변경', '내용', ''}
+    results = []
+    for row_html in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE):
+        cells = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html, re.DOTALL | re.IGNORECASE)
+        if len(cells) < 3:
+            continue
+        field = _cell_text(cells[0])
+        if field in SKIP or len(field) > 30:
+            continue
+        before = _cell_text(cells[1])
+        # after: xforms_input 값 우선, 없으면 plain text
+        after_inputs = re.findall(r'xforms_input[^>]*>([^<]*)<', cells[2])
+        after_parts = [v.strip() for v in after_inputs if v.strip()]
+        after = ' ~ '.join(after_parts) if after_parts else _cell_text(cells[2])
+        if before and after and before != after and before not in SKIP:
+            results.append((field, before, after))
+    return results
+
+
 def find_dates_from_html(html):
     """계약체결일자 시작/종료 날짜 추출 (xforms_input 날짜 패턴)"""
     # xforms_input span 안의 날짜 형식 값만 추출
@@ -352,6 +381,7 @@ def parse(html, rcept_dt, report_nm):
         "end_date":           None,
         "orig_start_date":    None,   # 정정 전 시작일
         "orig_end_date":      None,   # 정정 전 종료일
+        "amend_fields":       [],     # 정정항목 리스트 [(field, before, after)]
         "buyer":              "",
         "vessel_type":        "",
         "vessel_category":    "상선",
@@ -393,13 +423,57 @@ def parse(html, rcept_dt, report_nm):
         row["delivery_month"] = dates[1].month
         row["delivery_date"]  = dates[1]
 
-    # ── 기재정정: 변경 전 날짜 추출 ──────────────────────────────────
+    # ── 기재정정: 항목/기존/정정 테이블 파싱 ────────────────────────
     if is_amendment:
-        orig_dates = find_original_dates(html)
-        if len(orig_dates) >= 1:
-            row["orig_start_date"] = orig_dates[0]
-        if len(orig_dates) >= 2:
-            row["orig_end_date"] = orig_dates[1]
+        amend_rows = parse_amendment_table(html)
+        row["amend_fields"] = amend_rows
+
+        for field, before, after in amend_rows:
+            fl = field  # 필드명 소문자 비교용
+            # 계약기간 변경
+            if any(k in fl for k in ["계약기간", "납품기간", "이행기간"]):
+                # before: "YYYY-MM-DD ~ YYYY-MM-DD" or single date
+                ds = re.findall(r'(\d{4}-\d{2}-\d{2})', before)
+                if len(ds) >= 2:
+                    try: row["orig_start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                    except: pass
+                    try: row["orig_end_date"]   = datetime.strptime(ds[1], "%Y-%m-%d")
+                    except: pass
+                elif len(ds) == 1:
+                    try: row["orig_end_date"]   = datetime.strptime(ds[0], "%Y-%m-%d")
+                    except: pass
+            # 계약종료일만 변경
+            elif any(k in fl for k in ["종료일", "완료일", "납기"]):
+                ds = re.findall(r'(\d{4}-\d{2}-\d{2})', before)
+                if ds:
+                    try: row["orig_end_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                    except: pass
+            # 계약시작일만 변경
+            elif any(k in fl for k in ["시작일", "착수일"]):
+                ds = re.findall(r'(\d{4}-\d{2}-\d{2})', before)
+                if ds:
+                    try: row["orig_start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                    except: pass
+            # 계약상대방 변경
+            elif any(k in fl for k in ["계약상대", "거래상대", "발주처"]):
+                if not row["buyer"]:
+                    row["buyer"] = after  # 변경 후 값이 현재 값
+            # 계약금액 변경
+            elif any(k in fl for k in ["계약금액", "공급금액", "총계약"]):
+                if "달러" in after or "USD" in after.upper():
+                    v = parse_usd_to_mil(after)
+                    if v: row["amount_usd_mil"] = v
+                elif any(k in after for k in ["원", "억", "조"]):
+                    v = parse_krw_to_bil(after)
+                    if v: row["amount_krw_bil"] = v
+
+        # fallback: xforms_input 날짜에서 orig 날짜 추출
+        if not row["orig_start_date"] and not row["orig_end_date"]:
+            orig_dates = find_original_dates(html)
+            if len(orig_dates) >= 1:
+                row["orig_start_date"] = orig_dates[0]
+            if len(orig_dates) >= 2:
+                row["orig_end_date"] = orig_dates[1]
 
     # ── 체결계약명 / 납품물목 ─────────────────────────────────────────
     contract_nm = find_val(pairs,
@@ -447,19 +521,56 @@ def parse(html, rcept_dt, report_nm):
                 break
 
     # ── 계약상대방(선주) ───────────────────────────────────────────────
+    _SKIP_VALS = {'-', '해당없음', 'N/A', '없음', '', 'N/a'}
+
+    def _clean_buyer(v):
+        v = re.sub(r'[\r\n]+', ' ', v)
+        v = re.sub(r'\s+', ' ', v).strip().rstrip('.')
+        return v if len(v) >= 2 else ""
+
     buyer = find_val(pairs, "계약상대방", "거래상대방", "발주처", "매수인",
                      "계약 상대방", "상대방", "거래처", "수요자", "납품처")
+    buyer = _clean_buyer(buyer) if buyer else ""
+
     if not buyer:
-        # pairs에 없으면 HTML에서 레이블 다음 td 값 탐색
-        all_text_plain = re.sub(r'<[^>]+>', ' ', html)
-        for label in ["계약상대방", "거래상대방", "발주처"]:
-            m_b = re.search(
-                rf'{re.escape(label)}\s*[^\n]{{0,30}}\n?\s*([^\n<]{{2,100}})', all_text_plain)
+        # td 기반 탐색: 레이블 td 다음 td에서 값 추출
+        for lbl in ["계약상대방", "거래상대방", "발주처", "매수인"]:
+            pat = (rf'>{re.escape(lbl)}</td>\s*'
+                   r'(?:<td[^>]*>)(.*?)(?:</td>)')
+            m_b = re.search(pat, html, re.DOTALL | re.IGNORECASE)
             if m_b:
-                val = m_b.group(1).strip().rstrip('.')
-                if val and val not in ('-', '해당없음', 'N/A', '없음', ''):
+                val = _clean_buyer(_cell_text(m_b.group(1)))
+                if val and val not in _SKIP_VALS:
                     buyer = val
                     break
+
+    if not buyer:
+        # xforms_input 값 중 회사명처럼 보이는 값 (날짜·숫자 아닌 텍스트, 2자 이상)
+        for is_v, text in items:
+            if not is_v:
+                continue
+            t = text.strip()
+            if (len(t) >= 2
+                    and not re.match(r'^[\d,\s.%]+$', t)
+                    and not re.search(r'\d{4}-\d{2}-\d{2}', t)
+                    and t not in _SKIP_VALS
+                    # 앞에서 이미 날짜/금액/계약명으로 매핑된 값은 제외
+                    and t not in (contract_nm, row.get("contract_nm", ""))):
+                # 이 값의 레이블이 "계약상대" 계열인지 items에서 역추적
+                pass  # pairs 기반으로 이미 충분하므로 여기선 생략
+
+    if not buyer:
+        # HTML plain text 에서 레이블 뒤 첫 비어있지 않은 줄
+        all_text_plain = re.sub(r'<[^>]+>', '\n', html)
+        for lbl in ["계약상대방", "거래상대방", "발주처"]:
+            m_b = re.search(
+                rf'{re.escape(lbl)}\s*\n\s*([^\n]{{2,120}})', all_text_plain)
+            if m_b:
+                val = _clean_buyer(m_b.group(1))
+                if val and val not in _SKIP_VALS:
+                    buyer = val
+                    break
+
     row["buyer"] = buyer
 
     # ── 계약금액 ──────────────────────────────────────────────────────
@@ -650,20 +761,23 @@ def save_xlsx(records, path):
         "수주일자",       # C  (contract_date)
         "계약시작일",     # D  (start_date)
         "계약종료일",     # E  (end_date)
-        "정정전시작일",   # F  (orig_start_date, 정정공시만)
-        "정정전종료일",   # G  (orig_end_date, 정정공시만)
-        "체결계약명",     # H  (선종/척수/납품품목 단서)
-        "계약상대",       # I  (buyer)
-        "선종",           # J
-        "척수",           # K
-        "인도년",         # L
-        "인도월",         # M
-        "금액(원화,십억원)",    # N
-        "금액(달러,백만)",      # O
-        "척당금액(달러,백만)",  # P
-        "기준환율",       # Q
-        "확정",           # R
-        "공시제목",       # S
+        "정정전시작일",   # F  (orig_start_date)
+        "정정전종료일",   # G  (orig_end_date)
+        "정정항목",       # H  (amended field names)
+        "정정전값",       # I  (before text)
+        "정정후값",       # J  (after text)
+        "체결계약명",     # K
+        "계약상대",       # L  (buyer)
+        "선종",           # M
+        "척수",           # N
+        "인도년",         # O
+        "인도월",         # P
+        "금액(원화,십억원)",    # Q
+        "금액(달러,백만)",      # R
+        "척당금액(달러,백만)",  # S
+        "기준환율",       # T
+        "확정",           # U
+        "공시제목",       # V
     ]
 
     for ci, h in enumerate(headers, 1):
@@ -676,6 +790,10 @@ def save_xlsx(records, path):
         return d.strftime("%Y-%m-%d") if d else ""
 
     for ri, d in enumerate(records, 2):
+        afields = d.get("amend_fields") or []
+        amend_names  = ", ".join(f for f, _, _ in afields)
+        amend_before = " / ".join(b for _, b, _ in afields)
+        amend_after  = " / ".join(a for _, _, a in afields)
         row_vals = [
             "정정" if d["is_amendment"] else "",
             CORP_NAME,
@@ -684,6 +802,9 @@ def save_xlsx(records, path):
             fmt(d.get("end_date")),
             fmt(d.get("orig_start_date")),
             fmt(d.get("orig_end_date")),
+            amend_names,
+            amend_before,
+            amend_after,
             d.get("contract_nm") or d.get("etc") or "",
             d.get("buyer") or "",
             d.get("vessel_type") or "",
@@ -700,7 +821,7 @@ def save_xlsx(records, path):
         for ci, v in enumerate(row_vals, 1):
             ws.cell(row=ri, column=ci, value=v)
 
-    col_widths = [8, 14, 12, 12, 12, 12, 12, 45, 22, 12, 6, 8, 8, 16, 14, 16, 10, 6, 45]
+    col_widths = [8, 14, 12, 12, 12, 12, 12, 24, 30, 30, 40, 22, 12, 6, 8, 8, 14, 14, 16, 10, 6, 45]
     for ci, w in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
 
@@ -713,7 +834,7 @@ def save_xlsx(records, path):
 def save_csv(records, path, encoding="euc-kr"):
     fields = [
         "정정여부", "회사", "수주일자", "계약시작일", "계약종료일",
-        "정정전시작일", "정정전종료일",
+        "정정전시작일", "정정전종료일", "정정항목", "정정전값", "정정후값",
         "체결계약명", "계약상대", "선종", "척수",
         "인도년", "인도월",
         "금액(원화,십억원)", "금액(달러,백만)", "척당금액(달러,백만)",
@@ -727,6 +848,7 @@ def save_csv(records, path, encoding="euc-kr"):
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for d in records:
+            afields = d.get("amend_fields") or []
             w.writerow({
                 "정정여부":         "정정" if d["is_amendment"] else "",
                 "회사":            CORP_NAME,
@@ -735,6 +857,9 @@ def save_csv(records, path, encoding="euc-kr"):
                 "계약종료일":       fmt(d.get("end_date")),
                 "정정전시작일":     fmt(d.get("orig_start_date")),
                 "정정전종료일":     fmt(d.get("orig_end_date")),
+                "정정항목":         ", ".join(f for f, _, _ in afields),
+                "정정전값":         " / ".join(b for _, b, _ in afields),
+                "정정후값":         " / ".join(a for _, _, a in afields),
                 "체결계약명":       d.get("contract_nm") or d.get("etc") or "",
                 "계약상대":         d.get("buyer") or "",
                 "선종":            d.get("vessel_type") or "",
