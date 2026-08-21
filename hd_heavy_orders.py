@@ -1,12 +1,13 @@
 """
-HD현대중공업 단일판매·공급계약 공시 수집 → CSV + 엑셀(뉴스수주 양식)
+조선사 단일판매·공급계약 공시 수집 → XLSX (기업별 시트)
 
 사용법:
     pip install requests openpyxl
 
     python hd_heavy_orders.py --api-key YOUR_DART_KEY
-    python hd_heavy_orders.py --api-key YOUR_DART_KEY --excel "수주현황.xlsx"
-    python hd_heavy_orders.py --api-key YOUR_DART_KEY --years 3
+    python hd_heavy_orders.py --api-key YOUR_DART_KEY --from-year 2020
+    python hd_heavy_orders.py --api-key YOUR_DART_KEY --year 2026
+    python hd_heavy_orders.py --api-key YOUR_DART_KEY --companies HD현대중공업 삼성중공업
 """
 
 import argparse
@@ -22,10 +23,19 @@ from pathlib import Path
 import requests
 from openpyxl import load_workbook
 
-CORP_CODE  = "01390344"
-CORP_NAME  = "HD현대중공업"
 DART_BASE  = "https://opendart.fss.or.kr/api"
 SHEET_NAME = "뉴스수주"
+
+# 기업명 → DART corp_code (공식 코드)
+COMPANIES = {
+    "HD현대중공업":   "01390344",
+    "한화오션":       "00164779",   # 구 대우조선해양
+    "HD한국조선해양": "01390341",   # HD현대 조선 중간지주
+    "삼성중공업":     "00806090",
+    "HD현대미포":     "00164621",   # HD현대미포조선
+}
+
+DEFAULT_COMPANIES = ["HD현대중공업", "한화오션", "HD한국조선해양", "삼성중공업"]
 
 COL = {
     "A": 1,  "B": 2,  "C": 3,  "D": 4,  "E": 5,
@@ -109,12 +119,14 @@ VESSEL_MAP = [
 
 # ── DART API ──────────────────────────────────────────────────────────────
 
-def get_list(api_key, bgn_de, end_de):
+def get_list(api_key, bgn_de, end_de, corp_code=None):
+    if corp_code is None:
+        corp_code = list(COMPANIES.values())[0]
     results, page = [], 1
     while True:
         try:
             r = requests.get(f"{DART_BASE}/list.json", params={
-                "crtfc_key": api_key, "corp_code": CORP_CODE,
+                "crtfc_key": api_key, "corp_code": corp_code,
                 "bgn_de": bgn_de, "end_de": end_de,
                 "page_count": 100, "page_no": page,
             }, timeout=15).json()
@@ -369,7 +381,7 @@ def find_original_dates(html):
     return dates[:2]
 
 
-def parse(html, rcept_dt, report_nm):
+def parse(html, rcept_dt, report_nm, corp_name=""):
     pairs, items = get_pairs(html)
 
     is_amendment = "[기재정정]" in report_nm or "(정정)" in report_nm
@@ -400,6 +412,7 @@ def parse(html, rcept_dt, report_nm):
         "clarksons":          "",
         "is_amendment":       is_amendment,
         "report_nm":          report_nm,
+        "corp_name":          corp_name,
     }
 
     # 공시 접수일 → 기본 날짜
@@ -747,40 +760,46 @@ def write_excel_row(ws, rn, d):
 
 # ── XLSX 저장 (시트 여러 개 유지 가능) ────────────────────────────────────
 
-def save_xlsx(records, path):
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
+XLSX_HEADERS = [
+    "정정여부", "회사", "수주일자", "계약시작일", "계약종료일",
+    "정정전시작일", "정정전종료일", "정정항목", "정정전값", "정정후값",
+    "체결계약명", "계약상대", "선종", "척수", "인도년", "인도월",
+    "금액(원화,십억원)", "금액(달러,백만)", "척당금액(달러,백만)",
+    "기준환율", "확정", "공시제목",
+]
+XLSX_WIDTHS = [8,14,12,12,12,12,12,24,30,30,40,22,12,6,8,8,14,14,16,10,6,45]
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "DART수주"
 
-    headers = [
-        "정정여부",       # A
-        "회사",           # B
-        "수주일자",       # C  (contract_date)
-        "계약시작일",     # D  (start_date)
-        "계약종료일",     # E  (end_date)
-        "정정전시작일",   # F  (orig_start_date)
-        "정정전종료일",   # G  (orig_end_date)
-        "정정항목",       # H  (amended field names)
-        "정정전값",       # I  (before text)
-        "정정후값",       # J  (after text)
-        "체결계약명",     # K
-        "계약상대",       # L  (buyer)
-        "선종",           # M
-        "척수",           # N
-        "인도년",         # O
-        "인도월",         # P
-        "금액(원화,십억원)",    # Q
-        "금액(달러,백만)",      # R
-        "척당금액(달러,백만)",  # S
-        "기준환율",       # T
-        "확정",           # U
-        "공시제목",       # V
+def _make_row_vals(d, fmt):
+    afields = d.get("amend_fields") or []
+    return [
+        "정정" if d["is_amendment"] else "",
+        d.get("corp_name") or "",
+        fmt(d.get("contract_date")),
+        fmt(d.get("start_date")),
+        fmt(d.get("end_date")),
+        fmt(d.get("orig_start_date")),
+        fmt(d.get("orig_end_date")),
+        ", ".join(f for f, _, _ in afields),
+        " / ".join(b for _, b, _ in afields),
+        " / ".join(a for _, _, a in afields),
+        d.get("contract_nm") or d.get("etc") or "",
+        d.get("buyer") or "",
+        d.get("vessel_type") or "",
+        d.get("quantity") or "",
+        d.get("delivery_year") or "",
+        d.get("delivery_month") or "",
+        d.get("amount_krw_bil") or "",
+        d.get("amount_usd_mil") or "",
+        d.get("unit_price_usd") or "",
+        d.get("exchange_rate") or "",
+        d.get("confirmed") or "",
+        d.get("report_nm") or "",
     ]
 
-    for ci, h in enumerate(headers, 1):
+
+def _write_sheet(ws, records, Font, PatternFill, Alignment):
+    for ci, h in enumerate(XLSX_HEADERS, 1):
         cell = ws.cell(row=1, column=ci, value=h)
         cell.font = Font(bold=True)
         cell.fill = PatternFill("solid", fgColor="DDEEFF")
@@ -790,40 +809,39 @@ def save_xlsx(records, path):
         return d.strftime("%Y-%m-%d") if d else ""
 
     for ri, d in enumerate(records, 2):
-        afields = d.get("amend_fields") or []
-        amend_names  = ", ".join(f for f, _, _ in afields)
-        amend_before = " / ".join(b for _, b, _ in afields)
-        amend_after  = " / ".join(a for _, _, a in afields)
-        row_vals = [
-            "정정" if d["is_amendment"] else "",
-            CORP_NAME,
-            fmt(d.get("contract_date")),
-            fmt(d.get("start_date")),
-            fmt(d.get("end_date")),
-            fmt(d.get("orig_start_date")),
-            fmt(d.get("orig_end_date")),
-            amend_names,
-            amend_before,
-            amend_after,
-            d.get("contract_nm") or d.get("etc") or "",
-            d.get("buyer") or "",
-            d.get("vessel_type") or "",
-            d.get("quantity") or "",
-            d.get("delivery_year") or "",
-            d.get("delivery_month") or "",
-            d.get("amount_krw_bil") or "",
-            d.get("amount_usd_mil") or "",
-            d.get("unit_price_usd") or "",
-            d.get("exchange_rate") or "",
-            d.get("confirmed") or "",
-            d.get("report_nm") or "",
-        ]
-        for ci, v in enumerate(row_vals, 1):
+        for ci, v in enumerate(_make_row_vals(d, fmt), 1):
             ws.cell(row=ri, column=ci, value=v)
 
-    col_widths = [8, 14, 12, 12, 12, 12, 12, 24, 30, 30, 40, 22, 12, 6, 8, 8, 14, 14, 16, 10, 6, 45]
-    for ci, w in enumerate(col_widths, 1):
+    for ci, w in enumerate(XLSX_WIDTHS, 1):
         ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+
+
+def save_xlsx(records, path):
+    """records 안에 여러 기업 포함 가능 → 기업별 시트 + 전체 시트"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = Workbook()
+    # 기업별 시트
+    from collections import defaultdict
+    by_corp = defaultdict(list)
+    for r in records:
+        by_corp[r.get("corp_name", "기타")].append(r)
+
+    first = True
+    for corp_nm, recs in by_corp.items():
+        if first:
+            ws = wb.active
+            ws.title = corp_nm[:31]
+            first = False
+        else:
+            ws = wb.create_sheet(title=corp_nm[:31])
+        _write_sheet(ws, recs, Font, PatternFill, Alignment)
+
+    # 전체 통합 시트 (기업 2개 이상일 때)
+    if len(by_corp) > 1:
+        ws_all = wb.create_sheet(title="전체")
+        _write_sheet(ws_all, records, Font, PatternFill, Alignment)
 
     wb.save(path)
     print(f"XLSX 저장: {path}  ({len(records)}건)")
@@ -878,85 +896,32 @@ def save_csv(records, path, encoding="euc-kr"):
 
 # ── 메인 ──────────────────────────────────────────────────────────────────
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--api-key",   required=True)
-    ap.add_argument("--years",     type=int, default=6)
-    ap.add_argument("--year",      type=int, default=0, help="특정 연도만 수집 (예: --year 2025)")
-    ap.add_argument("--excel",     default="", help="결과를 입력할 엑셀 파일")
-    ap.add_argument("--reference", default="", help="크로스체크용 학습 엑셀 (수주학습용.xlsx)")
-    ap.add_argument("--csv-out",   default="", help="CSV 저장 경로 (생략 시 저장 안 함)")
-    ap.add_argument("--xlsx-out",  default="HD현대중공업_수주.xlsx", help="XLSX 저장 경로")
-    ap.add_argument("--encoding",  default="euc-kr", help="CSV 인코딩 (기본: euc-kr)")
-    ap.add_argument("--debug",     action="store_true", help="공란 원인 분석 출력")
-    args = ap.parse_args()
-
-    # 학습 데이터 로드
-    ref = {}
-    if args.reference and Path(args.reference).exists():
-        ref = load_reference(args.reference)
-        print(f"학습 데이터: {len(ref)}건 로드\n")
-    elif args.excel and Path(args.excel).exists():
-        ref = load_reference(args.excel)
-        print(f"학습 데이터(엑셀): {len(ref)}건 로드\n")
-
-    today = datetime.today()
-
-    # --year 옵션: 해당 연도 1월1일~12월31일만
-    if args.year:
-        start = datetime(args.year, 1, 1)
-        end   = datetime(args.year, 12, 31)
-        ranges = [(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))]
-        print(f"HD현대중공업 수주 수집 ({args.year}년)")
-    else:
-        start = today.replace(year=today.year - args.years, month=1, day=1)
-        ranges, cur = [], start
-        while cur < today:
-            nxt = min(cur + timedelta(days=364), today)
-            ranges.append((cur.strftime("%Y%m%d"), nxt.strftime("%Y%m%d")))
-            cur = nxt + timedelta(days=1)
-        print(f"HD현대중공업 수주 수집 ({start.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')})")
-
-    print(f"조회 구간: {len(ranges)}개\n")
-
-    wb, ws = None, None
-    if args.excel:
-        ep = Path(args.excel)
-        if not ep.exists():
-            print(f"[오류] 파일 없음: {ep}"); return
-        wb = load_workbook(str(ep))
-        if SHEET_NAME not in wb.sheetnames:
-            print(f"[오류] '{SHEET_NAME}' 시트 없음"); return
-        ws = wb[SHEET_NAME]
-
+def _collect_one_company(api_key, corp_name, corp_code, ranges, ref, args):
+    """단일 기업 공시 수집 → records 리스트 반환"""
     records = []
-    added = skipped = 0
-
-    for bgn, end in ranges:
-        print(f"  {bgn[:4]}년 조회...")
-        items = get_list(args.api_key, bgn, end)
-        print(f"    공시 {len(items)}건")
+    for bgn, end_d in ranges:
+        print(f"    {bgn[:4]}년 조회...")
+        items = get_list(api_key, bgn, end_d, corp_code)
+        print(f"      공시 {len(items)}건")
 
         for item in items:
             rcept_no  = item.get("rcept_no", "")
             rcept_dt  = item.get("rcept_dt", "")
             report_nm = item.get("report_nm", "").strip()
 
-            html = get_html(args.api_key, rcept_no)
+            html = get_html(api_key, rcept_no)
             if not html:
-                skipped += 1
                 continue
 
-            data = parse(html, rcept_dt, report_nm)
+            data = parse(html, rcept_dt, report_nm, corp_name)
 
-            # 학습 데이터로 빈 필드 보완
             if ref:
                 data = apply_reference(data, ref)
 
             amend_tag = "[정정]" if data["is_amendment"] else ""
             cdate = data["contract_date"].strftime("%Y-%m-%d") if data["contract_date"] else "?"
             edate = data["end_date"].strftime("%Y-%m-%d") if data["end_date"] else "?"
-            print(f"      {amend_tag}{cdate}~{edate} | {data['vessel_type'] or '-'} | {data['buyer'] or '-'} | {data['quantity'] or '?'}척 | USD{data['amount_usd_mil'] or ''} KRW{data['amount_krw_bil'] or ''} 환율{data['exchange_rate'] or '-'}")
+            print(f"        {amend_tag}{cdate}~{edate} | {data['vessel_type'] or '-'} | {data['buyer'] or '-'} | {data['quantity'] or '?'}척 | USD{data['amount_usd_mil'] or ''} KRW{data['amount_krw_bil'] or ''}")
 
             # --debug: 공란 원인 분석
             if getattr(args, 'debug', False):
@@ -1004,30 +969,82 @@ def main():
                             if is_v and txt:
                                 print(f"            val: {txt!r}")
 
-            if ws is not None:
-                if already_exists(ws, data["contract_date"]):
-                    skipped += 1
-                    continue
-                nr = find_next_empty_row(ws)
-                write_excel_row(ws, nr, data)
-                added += 1
-            else:
-                added += 1
-
             records.append(data)
             time.sleep(0.5)
 
         time.sleep(0.3)
 
-    if wb:
-        wb.save(args.excel)
-        print(f"\n엑셀 저장: {args.excel}  ({added}건 추가, {skipped}건 건너뜀)")
+    return records
+
+
+def main():
+    ap = argparse.ArgumentParser(description="조선사 단일판매·공급계약 공시 수집")
+    ap.add_argument("--api-key",      required=True)
+    ap.add_argument("--companies",    nargs="+", default=DEFAULT_COMPANIES,
+                    metavar="COMPANY",
+                    help=f"수집 기업명 (기본: {' '.join(DEFAULT_COMPANIES)})")
+    ap.add_argument("--from-year",    type=int, default=2020,
+                    help="수집 시작 연도 (기본: 2020)")
+    ap.add_argument("--year",         type=int, default=0,
+                    help="특정 연도만 수집 (예: --year 2026)")
+    ap.add_argument("--reference",    default="", help="크로스체크용 학습 엑셀")
+    ap.add_argument("--csv-out",      default="", help="CSV 저장 경로 (생략 시 저장 안 함)")
+    ap.add_argument("--xlsx-out",     default="조선사_수주.xlsx", help="XLSX 저장 경로")
+    ap.add_argument("--encoding",     default="euc-kr", help="CSV 인코딩 (기본: euc-kr)")
+    ap.add_argument("--debug",        action="store_true", help="공란 원인 분석 출력")
+    args = ap.parse_args()
+
+    # 학습 데이터 로드
+    ref = {}
+    if args.reference and Path(args.reference).exists():
+        ref = load_reference(args.reference)
+        print(f"학습 데이터: {len(ref)}건 로드\n")
+
+    today = datetime.today()
+
+    # 조회 구간 계산
+    if args.year:
+        ranges = [(f"{args.year}0101", f"{args.year}1231")]
+        period_str = f"{args.year}년"
+    else:
+        from_year = args.from_year
+        cur = datetime(from_year, 1, 1)
+        ranges = []
+        while cur < today:
+            nxt = min(cur + timedelta(days=364), today)
+            ranges.append((cur.strftime("%Y%m%d"), nxt.strftime("%Y%m%d")))
+            cur = nxt + timedelta(days=1)
+        period_str = f"{from_year}년~{today.year}년"
+
+    # 기업 목록 확인
+    target_corps = []
+    for name in args.companies:
+        code = COMPANIES.get(name)
+        if not code:
+            print(f"[경고] 알 수 없는 기업: {name}  (등록된 기업: {', '.join(COMPANIES.keys())})")
+            continue
+        target_corps.append((name, code))
+
+    if not target_corps:
+        print("[오류] 수집할 기업이 없습니다."); return
+
+    print(f"수집 기간: {period_str}")
+    print(f"수집 기업: {', '.join(n for n, _ in target_corps)}")
+    print(f"조회 구간: {len(ranges)}개\n")
+
+    all_records = []
+    for corp_name, corp_code in target_corps:
+        print(f"── {corp_name} ({corp_code}) ──────────────────")
+        recs = _collect_one_company(args.api_key, corp_name, corp_code, ranges, ref, args)
+        print(f"  → {corp_name} {len(recs)}건 수집\n")
+        all_records.extend(recs)
+
+    print(f"총 {len(all_records)}건 수집  (정정공시: {sum(1 for r in all_records if r['is_amendment'])}건)")
 
     if args.xlsx_out:
-        save_xlsx(records, args.xlsx_out)
+        save_xlsx(all_records, args.xlsx_out)
     if args.csv_out:
-        save_csv(records, args.csv_out, args.encoding)
-    print(f"\n정정공시: {sum(1 for r in records if r['is_amendment'])}건 포함")
+        save_csv(all_records, args.csv_out, args.encoding)
 
 
 if __name__ == "__main__":
