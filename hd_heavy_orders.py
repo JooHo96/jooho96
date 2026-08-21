@@ -14,10 +14,16 @@ import calendar
 import csv
 import io
 import re
+import sys
 import time
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# 한글 윈도우 CMD 출력 깨짐 방지
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="cp949", errors="replace")
+    sys.stderr.reconfigure(encoding="cp949", errors="replace")
 
 import requests
 from openpyxl import load_workbook
