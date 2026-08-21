@@ -1002,25 +1002,48 @@ def _collect_one_company(api_key, corp_name, corp_code, ranges, ref, args):
             if data["is_amendment"]:
                 for field, before, after in (data.get("amend_fields") or []):
                     if any(k in field for k in ["계약기간", "납품기간", "이행기간"]):
-                        ds = re.findall(r'\d{4}-\d{2}-\d{2}', after)
-                        if len(ds) >= 2:
-                            try: data["start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                        ds_b = re.findall(r'\d{4}-\d{2}-\d{2}', before)
+                        ds_a = re.findall(r'\d{4}-\d{2}-\d{2}', after)
+                        # before: orig_start / orig_end
+                        if len(ds_b) >= 2:
+                            try: data["orig_start_date"] = datetime.strptime(ds_b[0], "%Y-%m-%d")
                             except: pass
-                            try: data["end_date"]   = datetime.strptime(ds[1], "%Y-%m-%d")
+                            try: data["orig_end_date"]   = datetime.strptime(ds_b[1], "%Y-%m-%d")
                             except: pass
-                        elif len(ds) == 1:
-                            try: data["end_date"]   = datetime.strptime(ds[0], "%Y-%m-%d")
+                        elif len(ds_b) == 1:
+                            try: data["orig_end_date"]   = datetime.strptime(ds_b[0], "%Y-%m-%d")
+                            except: pass
+                        # after: 현재 start / end
+                        if len(ds_a) >= 2:
+                            try: data["start_date"] = datetime.strptime(ds_a[0], "%Y-%m-%d")
+                            except: pass
+                            try: data["end_date"]   = datetime.strptime(ds_a[1], "%Y-%m-%d")
+                            except: pass
+                        elif len(ds_a) == 1:
+                            try: data["end_date"]   = datetime.strptime(ds_a[0], "%Y-%m-%d")
                             except: pass
                     elif any(k in field for k in ["종료일", "완료일", "납기"]):
-                        ds = re.findall(r'\d{4}-\d{2}-\d{2}', after)
-                        if ds:
-                            try: data["end_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                        ds_b = re.findall(r'\d{4}-\d{2}-\d{2}', before)
+                        ds_a = re.findall(r'\d{4}-\d{2}-\d{2}', after)
+                        if ds_b:
+                            try: data["orig_end_date"] = datetime.strptime(ds_b[0], "%Y-%m-%d")
+                            except: pass
+                        if ds_a:
+                            try: data["end_date"] = datetime.strptime(ds_a[0], "%Y-%m-%d")
                             except: pass
                     elif any(k in field for k in ["시작일", "착수일"]):
-                        ds = re.findall(r'\d{4}-\d{2}-\d{2}', after)
-                        if ds:
-                            try: data["start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
+                        ds_b = re.findall(r'\d{4}-\d{2}-\d{2}', before)
+                        ds_a = re.findall(r'\d{4}-\d{2}-\d{2}', after)
+                        if ds_b:
+                            try: data["orig_start_date"] = datetime.strptime(ds_b[0], "%Y-%m-%d")
                             except: pass
+                        if ds_a:
+                            try: data["start_date"] = datetime.strptime(ds_a[0], "%Y-%m-%d")
+                            except: pass
+
+                # orig_start_date 미설정 시 start_date로 채움 (시작일 변경 없는 경우)
+                if data["orig_end_date"] and not data["orig_start_date"]:
+                    data["orig_start_date"] = data["start_date"]
 
             # --amendments-only: 정정공시만 저장
             if getattr(args, 'amendments_only', False) and not data["is_amendment"]:
