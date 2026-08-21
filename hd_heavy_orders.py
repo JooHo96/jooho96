@@ -77,25 +77,32 @@ VESSEL_MAP = [
     ("Capesize",   "벌크선"),
     ("Panamax",    "벌크선"),
     ("Handymax",   "벌크선"),
-    # 해양
+    # 해양 (구체적인 것 먼저, 마지막에 단독 "해양" 폴백)
     ("FPSO",       "해양"),
     ("풍력",       "해양"),
     ("해양플랜트", "해양"),
+    ("해양프로젝트","해양"),
     ("드릴십",     "해양"),
     ("drillship",  "해양"),
+    ("offshore",   "해양"),
     # 특수선
     ("수상함",     "특수선"),
     ("호위함",     "특수선"),
     ("구축함",     "특수선"),
     ("잠수함",     "특수선"),
     ("군함",       "특수선"),
+    ("쇄빙전용",   "특수선"),
     ("쇄빙",       "특수선"),
     ("함정",       "특수선"),
     ("특수선",     "특수선"),
     ("빙위",       "특수선"),
-    # 엔진
+    # 엔진 / 기자재
     ("엔진",       "선박용엔진"),
     ("engine",     "선박용엔진"),
+    ("발전기",     "선박용엔진"),
+    ("발전설비",   "선박용엔진"),
+    # 해양 단독 폴백 (마지막에 두어야 더 구체적인 것에 먼저 매칭)
+    ("해양",       "해양"),
 ]
 
 
@@ -373,6 +380,14 @@ def parse(html, rcept_dt, report_nm):
         if m_qty:
             row["quantity"] = int(m_qty.group(1))
 
+    if not row["quantity"]:
+        # 엔진/기자재: "N기", "N대", "N세트" 패턴 (체결계약명 우선)
+        for src in [contract_nm, " ".join(t for iv, t in items if iv), html[:5000]]:
+            m_qty = re.search(r'(\d+)\s*(기|대|세트)', src)
+            if m_qty:
+                row["quantity"] = int(m_qty.group(1))
+                break
+
     # ── 계약상대방(선주) ───────────────────────────────────────────────
     row["buyer"] = find_val(pairs, "계약상대방", "거래상대방", "발주처", "매수인")
 
@@ -577,8 +592,7 @@ def save_xlsx(records, path):
         "척당금액(달러,백만)",  # P
         "기준환율",       # Q
         "확정",           # R
-        "상선특수선",     # S
-        "공시제목",       # T
+        "공시제목",       # S
     ]
 
     for ci, h in enumerate(headers, 1):
@@ -610,13 +624,12 @@ def save_xlsx(records, path):
             d.get("unit_price_usd") or "",
             d.get("exchange_rate") or "",
             d.get("confirmed") or "",
-            d.get("vessel_category") or "",
             d.get("report_nm") or "",
         ]
         for ci, v in enumerate(row_vals, 1):
             ws.cell(row=ri, column=ci, value=v)
 
-    col_widths = [8, 14, 12, 12, 12, 12, 12, 45, 22, 12, 6, 8, 8, 16, 14, 16, 10, 6, 10, 45]
+    col_widths = [8, 14, 12, 12, 12, 12, 12, 45, 22, 12, 6, 8, 8, 16, 14, 16, 10, 6, 45]
     for ci, w in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
 
@@ -633,7 +646,7 @@ def save_csv(records, path, encoding="euc-kr"):
         "체결계약명", "계약상대", "선종", "척수",
         "인도년", "인도월",
         "금액(원화,십억원)", "금액(달러,백만)", "척당금액(달러,백만)",
-        "기준환율", "확정", "상선특수선", "공시제목",
+        "기준환율", "확정", "공시제목",
     ]
 
     def fmt(d):
@@ -662,7 +675,6 @@ def save_csv(records, path, encoding="euc-kr"):
                 "척당금액(달러,백만)": d.get("unit_price_usd") or "",
                 "기준환율":         d.get("exchange_rate") or "",
                 "확정":            d.get("confirmed") or "",
-                "상선특수선":       d.get("vessel_category") or "",
                 "공시제목":         d.get("report_nm") or "",
             })
     print(f"CSV 저장: {path}  ({len(records)}건)")
