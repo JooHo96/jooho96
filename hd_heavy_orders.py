@@ -250,25 +250,40 @@ def _cell_text(html_frag):
 
 
 def parse_amendment_table(html):
-    """정정공시 '항목|기존|정정' 테이블 파싱.
+    """정정공시 '정정항목|정정전|정정후' 테이블 파싱.
+
+    '정정전'/'정정후' 헤더를 가진 <table> 안으로 한정한다.
+    (그러지 않으면 본문의 '레이블|하위레이블|값' 3칸 행이 섞여 들어옴)
+
     Returns list of (field_name, before_text, after_text)
     """
-    SKIP = {'항목', '기존', '정정', '변경', '내용', ''}
+    SKIP = {'항목', '기존', '정정', '변경', '내용', '정정항목', '정정전', '정정후', ''}
     results = []
-    for row_html in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE):
-        cells = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html, re.DOTALL | re.IGNORECASE)
-        if len(cells) < 3:
-            continue
-        field = _cell_text(cells[0])
-        if field in SKIP or len(field) > 30:
-            continue
-        before = _cell_text(cells[1])
-        # after: xforms_input 값 우선, 없으면 plain text
-        after_inputs = re.findall(r'xforms_input[^>]*>([^<]*)<', cells[2])
-        after_parts = [v.strip() for v in after_inputs if v.strip()]
-        after = ' ~ '.join(after_parts) if after_parts else _cell_text(cells[2])
-        if before and after and before != after and before not in SKIP:
-            results.append((field, before, after))
+
+    tables = re.findall(r'<table[^>]*>(.*?)</table>', html, re.DOTALL | re.IGNORECASE)
+    amend_tables = [t for t in tables
+                    if '정정전' in _cell_text(t) and '정정후' in _cell_text(t)]
+    if not amend_tables:
+        return results
+
+    for table_html in amend_tables:
+        for row_html in re.findall(r'<tr[^>]*>(.*?)</tr>', table_html,
+                                   re.DOTALL | re.IGNORECASE):
+            cells = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html,
+                               re.DOTALL | re.IGNORECASE)
+            if len(cells) < 3:
+                continue
+            # rowspan 등으로 앞에 칸이 더 붙은 경우 뒤 3칸이 항목/전/후
+            cells = cells[-3:]
+            field  = _cell_text(cells[0])
+            before = _cell_text(cells[1])
+            after  = _cell_text(cells[2])
+            if not field or len(field) > 40:
+                continue
+            if field in SKIP or before in SKIP or after in SKIP:
+                continue
+            if before and after and before != after:
+                results.append((field, before, after))
     return results
 
 
@@ -453,17 +468,37 @@ def parse(html, rcept_dt, report_nm, corp_name=""):
         except Exception:
             pass
 
-    # ── 시작일 / 종료일: xforms_input 날짜값 순서대로 추출 ────────────
-    dates = find_dates_from_html(html)
-    if len(dates) >= 1:
-        row["start_date"]    = dates[0]
-        row["contract_date"] = dates[0]
-        row["date"]          = dates[0]
-    if len(dates) >= 2:
-        row["end_date"]       = dates[1]
-        row["delivery_year"]  = dates[1].year
-        row["delivery_month"] = dates[1].month
-        row["delivery_date"]  = dates[1]
+    # ── 시작일 / 종료일 / 수주일자: 레이블 기반 추출 우선 ─────────────
+    # (정정공시는 문서 앞쪽에 '정정일자', '공시서류제출일'이 먼저 나오므로
+    #  위치 기반 추출을 그대로 쓰면 계약기간이 아니라 정정 메타날짜를 잡는다)
+    lbl_start = parse_date(find_val(pairs, "시작일", "착수일"))
+    lbl_end   = parse_date(find_val(pairs, "종료일", "완료일"))
+    lbl_cdate = parse_date(find_val(pairs, "계약(수주)일", "계약체결일", "수주일자"))
+
+    if lbl_start:
+        row["start_date"] = lbl_start
+    if lbl_end:
+        row["end_date"] = lbl_end
+    if lbl_cdate:
+        row["contract_date"] = lbl_cdate
+        row["date"]          = lbl_cdate
+
+    # 레이블로 못 찾은 값만 위치 기반으로 보완
+    if not row["start_date"] or not row["end_date"]:
+        dates = find_dates_from_html(html)
+        if not row["start_date"] and len(dates) >= 1:
+            row["start_date"] = dates[0]
+        if not row["end_date"] and len(dates) >= 2:
+            row["end_date"] = dates[1]
+
+    if not row["contract_date"] and row["start_date"]:
+        row["contract_date"] = row["start_date"]
+        row["date"]          = row["start_date"]
+
+    if row["end_date"]:
+        row["delivery_year"]  = row["end_date"].year
+        row["delivery_month"] = row["end_date"].month
+        row["delivery_date"]  = row["end_date"]
 
     # ── 기재정정: 항목/기존/정정 테이블 파싱 ────────────────────────
     if is_amendment:
@@ -471,51 +506,61 @@ def parse(html, rcept_dt, report_nm, corp_name=""):
         row["amend_fields"] = amend_rows
 
         for field, before, after in amend_rows:
-            fl = field  # 필드명 소문자 비교용
-            # 계약기간 변경
-            if any(k in fl for k in ["계약기간", "납품기간", "이행기간"]):
-                # before: "YYYY-MM-DD ~ YYYY-MM-DD" or single date
-                ds = re.findall(r'(\d{4}-\d{2}-\d{2})', before)
-                if len(ds) >= 2:
-                    try: row["orig_start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
-                    except: pass
-                    try: row["orig_end_date"]   = datetime.strptime(ds[1], "%Y-%m-%d")
-                    except: pass
-                elif len(ds) == 1:
-                    try: row["orig_end_date"]   = datetime.strptime(ds[0], "%Y-%m-%d")
-                    except: pass
-            # 계약종료일만 변경
-            elif any(k in fl for k in ["종료일", "완료일", "납기"]):
-                ds = re.findall(r'(\d{4}-\d{2}-\d{2})', before)
-                if ds:
-                    try: row["orig_end_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
-                    except: pass
-            # 계약시작일만 변경
-            elif any(k in fl for k in ["시작일", "착수일"]):
-                ds = re.findall(r'(\d{4}-\d{2}-\d{2})', before)
-                if ds:
-                    try: row["orig_start_date"] = datetime.strptime(ds[0], "%Y-%m-%d")
-                    except: pass
-            # 계약상대방 변경
-            elif any(k in fl for k in ["계약상대", "거래상대", "발주처", "상대방"]):
-                if not row["buyer"]:
-                    row["buyer"] = after  # 변경 후 값이 현재 값
+            ds_b = re.findall(r'\d{4}-\d{2}-\d{2}', before)
+            ds_a = re.findall(r'\d{4}-\d{2}-\d{2}', after)
+
+            # 종료일 (예: '5. 계약기간 -종료일' → '계약기간'보다 먼저 판정)
+            if any(k in field for k in ["종료일", "완료일", "납기"]):
+                if ds_b: row["orig_end_date"] = parse_date(ds_b[0])
+                if ds_a: row["end_date"]      = parse_date(ds_a[0])
+            # 시작일
+            elif any(k in field for k in ["시작일", "착수일"]):
+                if ds_b: row["orig_start_date"] = parse_date(ds_b[0])
+                if ds_a: row["start_date"]      = parse_date(ds_a[0])
+            # 계약기간 (시작~종료 한 칸에 들어있는 경우)
+            elif any(k in field for k in ["계약기간", "납품기간", "이행기간"]):
+                if len(ds_b) >= 2:
+                    row["orig_start_date"] = parse_date(ds_b[0])
+                    row["orig_end_date"]   = parse_date(ds_b[1])
+                elif len(ds_b) == 1:
+                    row["orig_end_date"]   = parse_date(ds_b[0])
+                if len(ds_a) >= 2:
+                    row["start_date"] = parse_date(ds_a[0])
+                    row["end_date"]   = parse_date(ds_a[1])
+                elif len(ds_a) == 1:
+                    row["end_date"]   = parse_date(ds_a[0])
+            # 계약상대방 변경 → 변경 후 값이 현재 값
+            elif any(k in field for k in ["계약상대", "거래상대", "발주처", "상대방"]):
+                if after and not re.match(r'^[\d,\s.]+$', after):
+                    row["buyer"] = after
             # 계약금액 변경
-            elif any(k in fl for k in ["계약금액", "공급금액", "총계약"]):
+            elif any(k in field for k in ["계약금액", "공급금액", "총계약"]):
                 if "달러" in after or "USD" in after.upper():
                     v = parse_usd_to_mil(after)
                     if v: row["amount_usd_mil"] = v
-                elif any(k in after for k in ["원", "억", "조"]):
+                elif re.search(r'\d', after):
                     v = parse_krw_to_bil(after)
                     if v: row["amount_krw_bil"] = v
 
-        # fallback: xforms_input 날짜에서 orig 날짜 추출
+        # 한쪽만 정정된 경우, 변경 없는 쪽은 현재 값과 동일
+        if row["orig_end_date"] and not row["orig_start_date"]:
+            row["orig_start_date"] = row["start_date"]
+        if row["orig_start_date"] and not row["orig_end_date"]:
+            row["orig_end_date"] = row["end_date"]
+
+        # fallback: 정정 테이블에서 아무 날짜도 못 얻은 경우만
         if not row["orig_start_date"] and not row["orig_end_date"]:
             orig_dates = find_original_dates(html)
             if len(orig_dates) >= 1:
                 row["orig_start_date"] = orig_dates[0]
             if len(orig_dates) >= 2:
                 row["orig_end_date"] = orig_dates[1]
+
+        # 정정 반영 후 인도년/월 재계산
+        if row["end_date"]:
+            row["delivery_year"]  = row["end_date"].year
+            row["delivery_month"] = row["end_date"].month
+            row["delivery_date"]  = row["end_date"]
 
     # ── 체결계약명 / 납품물목 ─────────────────────────────────────────
     contract_nm = find_val(pairs,
@@ -1013,53 +1058,6 @@ def _collect_one_company(api_key, corp_name, corp_code, ranges, ref, args):
                     texts = [_cell_text(c) for c in cells]
                     if any(re.search(r'\d{4}-\d{2}-\d{2}', t) for t in texts):
                         print(f"            [{len(cells)}칸] {texts}")
-
-            # 정정공시: amend_fields의 after 날짜로 start/end_date 확정
-            if data["is_amendment"]:
-                for field, before, after in (data.get("amend_fields") or []):
-                    if any(k in field for k in ["계약기간", "납품기간", "이행기간"]):
-                        ds_b = re.findall(r'\d{4}-\d{2}-\d{2}', before)
-                        ds_a = re.findall(r'\d{4}-\d{2}-\d{2}', after)
-                        # before: orig_start / orig_end
-                        if len(ds_b) >= 2:
-                            try: data["orig_start_date"] = datetime.strptime(ds_b[0], "%Y-%m-%d")
-                            except: pass
-                            try: data["orig_end_date"]   = datetime.strptime(ds_b[1], "%Y-%m-%d")
-                            except: pass
-                        elif len(ds_b) == 1:
-                            try: data["orig_end_date"]   = datetime.strptime(ds_b[0], "%Y-%m-%d")
-                            except: pass
-                        # after: 현재 start / end
-                        if len(ds_a) >= 2:
-                            try: data["start_date"] = datetime.strptime(ds_a[0], "%Y-%m-%d")
-                            except: pass
-                            try: data["end_date"]   = datetime.strptime(ds_a[1], "%Y-%m-%d")
-                            except: pass
-                        elif len(ds_a) == 1:
-                            try: data["end_date"]   = datetime.strptime(ds_a[0], "%Y-%m-%d")
-                            except: pass
-                    elif any(k in field for k in ["종료일", "완료일", "납기"]):
-                        ds_b = re.findall(r'\d{4}-\d{2}-\d{2}', before)
-                        ds_a = re.findall(r'\d{4}-\d{2}-\d{2}', after)
-                        if ds_b:
-                            try: data["orig_end_date"] = datetime.strptime(ds_b[0], "%Y-%m-%d")
-                            except: pass
-                        if ds_a:
-                            try: data["end_date"] = datetime.strptime(ds_a[0], "%Y-%m-%d")
-                            except: pass
-                    elif any(k in field for k in ["시작일", "착수일"]):
-                        ds_b = re.findall(r'\d{4}-\d{2}-\d{2}', before)
-                        ds_a = re.findall(r'\d{4}-\d{2}-\d{2}', after)
-                        if ds_b:
-                            try: data["orig_start_date"] = datetime.strptime(ds_b[0], "%Y-%m-%d")
-                            except: pass
-                        if ds_a:
-                            try: data["start_date"] = datetime.strptime(ds_a[0], "%Y-%m-%d")
-                            except: pass
-
-                # orig_start_date 미설정 시 start_date로 채움 (시작일 변경 없는 경우)
-                if data["orig_end_date"] and not data["orig_start_date"]:
-                    data["orig_start_date"] = data["start_date"]
 
             # --amendments-only: 정정공시만 저장
             if getattr(args, 'amendments_only', False) and not data["is_amendment"]:
