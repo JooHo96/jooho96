@@ -132,6 +132,29 @@ def get_list(api_key, bgn_de, end_de):
     return results
 
 
+def _decode_html(raw_bytes):
+    """HTML bytes → 문자열: charset 메타태그로 인코딩 자동 감지"""
+    # UTF-8 BOM
+    if raw_bytes.startswith(b'\xef\xbb\xbf'):
+        return raw_bytes[3:].decode('utf-8', errors='replace')
+    # meta charset 태그 추출
+    m = re.search(rb'charset\s*=\s*["\']?\s*([\w_-]+)', raw_bytes[:4000], re.IGNORECASE)
+    if m:
+        enc = m.group(1).decode('ascii', errors='ignore').strip().lower()
+        enc = enc.replace('ks_c_5601-1987', 'cp949').replace('ks_c_5601', 'cp949')
+        enc = enc or 'cp949'
+    else:
+        # 감지 실패 시 UTF-8 시도 후 cp949 폴백
+        try:
+            return raw_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            enc = 'cp949'
+    try:
+        return raw_bytes.decode(enc, errors='replace')
+    except (LookupError, UnicodeDecodeError):
+        return raw_bytes.decode('cp949', errors='replace')
+
+
 def get_html(api_key, rcept_no):
     try:
         r = requests.get(f"{DART_BASE}/document.xml",
@@ -140,8 +163,8 @@ def get_html(api_key, rcept_no):
             with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                 for n in z.namelist():
                     raw = z.read(n)
-                    return raw.decode("euc-kr", errors="replace")
-        return r.content.decode("euc-kr", errors="replace")
+                    return _decode_html(raw)
+        return _decode_html(r.content)
     except Exception as e:
         print(f"    [오류] 문서 다운로드: {e}")
         return None
@@ -347,13 +370,17 @@ def parse(html, rcept_dt, report_nm):
         if len(orig_dates) >= 2:
             row["orig_end_date"] = orig_dates[1]
 
-    # ── 체결계약명 ────────────────────────────────────────────────────
-    contract_nm = find_val(pairs, "체결계약명", "계약명", "계약건명", "공급물품", "거래내용")
+    # ── 체결계약명 / 납품물목 ─────────────────────────────────────────
+    contract_nm = find_val(pairs,
+        "체결계약명", "계약명", "계약건명",
+        "납품물목", "납품명세", "납품사항", "납품목록",
+        "공급물품", "거래내용", "물품내용", "서비스내용")
     row["contract_nm"] = contract_nm
     row["etc"] = contract_nm
 
     # ── 척수 추출 (우선순위: pairs 레이블 > 계약명 > 전체 xforms_input > HTML)
-    qty_from_label = find_val(pairs, "계약수량", "선박수", "납품수량", "수량", "척수", "건조척수")
+    qty_from_label = find_val(pairs, "계약수량", "선박수", "납품수량", "수량", "척수", "건조척수",
+                              "납품물목", "납품명세", "납품사항")
     if qty_from_label:
         m_qty = re.search(r'(\d+)', qty_from_label)
         if m_qty:
@@ -375,8 +402,8 @@ def parse(html, rcept_dt, report_nm):
                     break
 
     if not row["quantity"]:
-        # HTML 전체에서 "N척" 패턴 (최후 수단)
-        m_qty = re.search(r'(\d+)\s*척', html[:8000])
+        # HTML 전체에서 "N척" 패턴 (최후 수단, 전체 탐색)
+        m_qty = re.search(r'(\d+)\s*척', html)
         if m_qty:
             row["quantity"] = int(m_qty.group(1))
 
