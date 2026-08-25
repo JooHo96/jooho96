@@ -85,14 +85,25 @@ def parse_document(raw: bytes) -> ET.Element:
         return ET.fromstring(text)
 
 
-def load_reports(paths):
-    """zip/xml 경로들 → [(라벨, 루트 Element)] 목록. zip 안에서는 본문 XML만 사용
-    (파일명에 _00760 같은 접미사가 붙은 것은 감사보고서 등 첨부문서)."""
-    reports = []
+def expand_inputs(paths):
+    """폴더가 섞여 있으면 폴더 안의 zip/xml 파일로 펼친다."""
+    out = []
     for p in paths:
         p = Path(p)
+        if p.is_dir():
+            out += sorted(p.glob("*.zip")) + sorted(p.glob("*.xml"))
+        else:
+            out.append(p)
+    return out
+
+
+def load_reports(paths, log=print):
+    """zip/xml/폴더 경로들 → [(라벨, 루트 Element)] 목록. zip 안에서는 본문 XML만 사용
+    (파일명에 _00760 같은 접미사가 붙은 것은 감사보고서 등 첨부문서)."""
+    reports = []
+    for p in expand_inputs(paths):
         if not p.exists():
-            print(f"[경고] 파일 없음: {p}", file=sys.stderr)
+            log(f"[경고] 파일 없음: {p}")
             continue
         if p.suffix.lower() == ".zip":
             with zipfile.ZipFile(p) as zf:
@@ -105,7 +116,7 @@ def load_reports(paths):
         try:
             root = parse_document(raw)
         except ET.ParseError as e:
-            print(f"[경고] XML 파싱 실패({p.name}): {e}", file=sys.stderr)
+            log(f"[경고] XML 파싱 실패({p.name}): {e}")
             continue
         reports.append((report_label(root, p.name), root))
     # 연도순 정렬
@@ -285,12 +296,54 @@ def write_section_sheet(wb: Workbook, sheet_name: str, section_title: str,
 
 
 # ──────────────────────────────────────────────────────────────
+# 추출 (CLI/GUI 공용)
+# ──────────────────────────────────────────────────────────────
+
+def toc_lines(reports):
+    """보고서별 목차를 문자열 리스트로 반환."""
+    lines = []
+    for label, root in reports:
+        name = clean_text("".join(next(root.iter("COMPANY-NAME"), ET.Element("x")).itertext()))
+        doc = clean_text("".join(next(root.iter("DOCUMENT-NAME"), ET.Element("x")).itertext()))
+        lines.append(f"===== [{label}] {name} {doc} =====")
+        for text, _ in iter_toc(root):
+            lines.append("  " + text)
+        lines.append("")
+    return lines
+
+
+def extract_to_workbook(reports, keywords, with_text=False, log=print):
+    """섹션 키워드들로 표를 추출해 (Workbook, 시트 수) 반환."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    n_sheets = 0
+    for label, root in reports:
+        for keyword in keywords:
+            hits = find_sections(root, keyword)
+            if not hits:
+                log(f"[{label}] '{keyword}' 섹션 없음 — 건너뜀")
+                continue
+            for title, section in hits:
+                short = re.sub(r"^[IVX0-9\.\s]+", "", title)  # 앞의 번호 제거
+                sheet = f"{label}_{short}"
+                base = sheet
+                k = 2
+                while sanitize_sheet_name(sheet) in wb.sheetnames:
+                    sheet = f"{base}_{k}"
+                    k += 1
+                write_section_sheet(wb, sheet, f"[{label}] {title}", section, with_text)
+                n_sheets += 1
+                log(f"[{label}] '{title}' → 시트 저장")
+    return wb, n_sheets
+
+
+# ──────────────────────────────────────────────────────────────
 # main
 # ──────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(description="DART 원문 zip/xml에서 섹션 표를 엑셀로 추출")
-    ap.add_argument("files", nargs="+", help="DART 원문 zip 또는 xml 파일들")
+    ap.add_argument("files", nargs="+", help="DART 원문 zip/xml 파일 또는 폴더 (폴더면 안의 zip 전부)")
     ap.add_argument("--toc", action="store_true", help="목차만 출력하고 종료")
     ap.add_argument("--section", action="append", default=[],
                     help="추출할 섹션명 키워드 (여러 번 지정 가능, 일부 문자열이면 됨)")
@@ -303,38 +356,13 @@ def main():
         sys.exit("읽을 수 있는 보고서가 없습니다.")
 
     if args.toc:
-        for label, root in reports:
-            name = clean_text("".join(next(root.iter("COMPANY-NAME"), ET.Element("x")).itertext()))
-            doc = clean_text("".join(next(root.iter("DOCUMENT-NAME"), ET.Element("x")).itertext()))
-            print(f"\n===== [{label}] {name} {doc} =====")
-            for text, _ in iter_toc(root):
-                print("  " + text)
+        print("\n".join(toc_lines(reports)))
         return
 
     if not args.section:
         sys.exit("--section 키워드를 지정하세요. (--toc 로 목차를 먼저 확인)")
 
-    wb = Workbook()
-    wb.remove(wb.active)
-    n_sheets = 0
-    for label, root in reports:
-        for keyword in args.section:
-            hits = find_sections(root, keyword)
-            if not hits:
-                print(f"[{label}] '{keyword}' 섹션 없음 — 건너뜀")
-                continue
-            for title, section in hits:
-                short = re.sub(r"^[IVX0-9\.\s]+", "", title)  # 앞의 번호 제거
-                sheet = f"{label}_{short}"
-                base = sheet
-                k = 2
-                while sanitize_sheet_name(sheet) in wb.sheetnames:
-                    sheet = f"{base}_{k}"
-                    k += 1
-                write_section_sheet(wb, sheet, f"[{label}] {title}", section, args.with_text)
-                n_sheets += 1
-                print(f"[{label}] '{title}' → 시트 저장")
-
+    wb, n_sheets = extract_to_workbook(reports, args.section, args.with_text)
     if n_sheets == 0:
         sys.exit("추출된 섹션이 없습니다. --toc 로 정확한 섹션명을 확인하세요.")
     wb.save(args.out)
