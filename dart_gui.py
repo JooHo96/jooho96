@@ -51,6 +51,8 @@ class DartGui:
             side="left", padx=6, fill="x", expand=True)
         self.with_text_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mid, text="본문 텍스트 포함", variable=self.with_text_var).pack(side="left")
+        self.merge_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(mid, text="한 시트로 합치기", variable=self.merge_var).pack(side="left")
 
         btns = ttk.Frame(root, padding=(8, 0))
         btns.pack(fill="x")
@@ -162,7 +164,8 @@ class DartGui:
                     return
                 self.log(f"\n추출 시작: {', '.join(keywords)}")
                 wb, n = extract_to_workbook(
-                    reports, keywords, self.with_text_var.get(), log=self.log)
+                    reports, keywords, self.with_text_var.get(),
+                    merge=self.merge_var.get(), log=self.log)
                 if n == 0:
                     messagebox.showwarning(
                         "알림", "추출된 섹션이 없습니다.\n[목차 보기]로 정확한 섹션명을 확인하세요.")

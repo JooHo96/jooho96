@@ -259,13 +259,12 @@ def sanitize_sheet_name(name: str) -> str:
     return name[:31] or "Sheet"
 
 
-def write_section_sheet(wb: Workbook, sheet_name: str, section_title: str,
-                        section: ET.Element, with_text: bool):
-    ws = wb.create_sheet(sanitize_sheet_name(sheet_name))
-    ws.cell(row=1, column=1, value=section_title).font = TITLE_FONT
-    row = 3
+def append_section(ws, start_row: int, section_title: str,
+                   section: ET.Element, with_text: bool) -> tuple:
+    """섹션 내용을 ws의 start_row부터 기록하고 (다음 행, 최대 열) 반환."""
+    ws.cell(row=start_row, column=1, value=section_title).font = TITLE_FONT
+    row = start_row + 2
     max_col = 1
-    seen_tables = set()
     for kind, content in iter_section_content(section, with_text):
         if kind == "caption":
             ws.cell(row=row, column=1, value=content).font = CAPTION_FONT
@@ -274,9 +273,6 @@ def write_section_sheet(wb: Workbook, sheet_name: str, section_title: str,
             ws.cell(row=row, column=1, value=content)
             row += 1
         elif kind == "table":
-            if id(content) in seen_tables:
-                continue
-            seen_tables.add(id(content))
             grid, header_rows = table_to_grid(content)
             if not grid:
                 continue
@@ -289,9 +285,19 @@ def write_section_sheet(wb: Workbook, sheet_name: str, section_title: str,
                         c.alignment = Alignment(horizontal="center")
                 max_col = max(max_col, len(line))
             row += len(grid) + 1  # 표 사이 한 줄 띄움
-    # 대략적인 열 너비
+    return row, max_col
+
+
+def autofit(ws, max_col: int):
     for col in range(1, max_col + 1):
         ws.column_dimensions[get_column_letter(col)].width = 16
+
+
+def write_section_sheet(wb: Workbook, sheet_name: str, section_title: str,
+                        section: ET.Element, with_text: bool):
+    ws = wb.create_sheet(sanitize_sheet_name(sheet_name))
+    _, max_col = append_section(ws, 1, section_title, section, with_text)
+    autofit(ws, max_col)
     return ws
 
 
@@ -312,11 +318,33 @@ def toc_lines(reports):
     return lines
 
 
-def extract_to_workbook(reports, keywords, with_text=False, log=print):
-    """섹션 키워드들로 표를 추출해 (Workbook, 시트 수) 반환."""
+def extract_to_workbook(reports, keywords, with_text=False, merge=False, log=print):
+    """섹션 키워드들로 표를 추출해 (Workbook, 시트 수) 반환.
+    merge=True 면 키워드별 시트 하나에 모든 연도를 세로로 이어 붙인다."""
     wb = Workbook()
     wb.remove(wb.active)
     n_sheets = 0
+    if merge:
+        for keyword in keywords:
+            ws, row, width = None, 1, 1
+            for label, root in reports:
+                hits = find_sections(root, keyword)
+                if not hits:
+                    log(f"[{label}] '{keyword}' 섹션 없음 — 건너뜀")
+                    continue
+                if ws is None:
+                    ws = wb.create_sheet(sanitize_sheet_name(keyword))
+                    n_sheets += 1
+                for title, section in hits:
+                    row, mc = append_section(ws, row, f"■ [{label}] {title}",
+                                             section, with_text)
+                    row += 2  # 연도 사이 두 줄 띄움
+                    width = max(width, mc)
+                    log(f"[{label}] '{title}' → '{keyword}' 시트에 추가")
+            if ws is not None:
+                autofit(ws, width)
+        return wb, n_sheets
+
     for label, root in reports:
         for keyword in keywords:
             hits = find_sections(root, keyword)
@@ -348,6 +376,8 @@ def main():
     ap.add_argument("--section", action="append", default=[],
                     help="추출할 섹션명 키워드 (여러 번 지정 가능, 일부 문자열이면 됨)")
     ap.add_argument("--with-text", action="store_true", help="표 외의 본문 문단도 포함")
+    ap.add_argument("--merge", action="store_true",
+                    help="연도별 시트 대신 섹션별 시트 하나에 모든 연도를 세로로 합침")
     ap.add_argument("--out", default="dart_extract.xlsx", help="출력 엑셀 파일명")
     args = ap.parse_args()
 
@@ -362,7 +392,8 @@ def main():
     if not args.section:
         sys.exit("--section 키워드를 지정하세요. (--toc 로 목차를 먼저 확인)")
 
-    wb, n_sheets = extract_to_workbook(reports, args.section, args.with_text)
+    wb, n_sheets = extract_to_workbook(reports, args.section, args.with_text,
+                                       merge=args.merge)
     if n_sheets == 0:
         sys.exit("추출된 섹션이 없습니다. --toc 로 정확한 섹션명을 확인하세요.")
     wb.save(args.out)
