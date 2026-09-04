@@ -125,12 +125,14 @@ def load_reports(paths, log=print):
 
 
 def report_label(root: ET.Element, filename: str) -> str:
-    """시트 이름에 쓸 라벨: 사업연도(예: 2025) 우선, 없으면 파일명에서 추출."""
+    """시트 이름에 쓸 라벨: 보고기간 종료월(예: 2025.12). 분기/반기 보고서 구분을 위해
+    연도만이 아니라 월까지 포함한다."""
     for tu in root.iter("TU"):
         if tu.get("AUNIT") == "PERIODTO" and tu.get("AUNITVALUE"):
-            return tu.get("AUNITVALUE")[:4]
-    m = re.search(r"(20\d{2})[._]", filename)
-    return m.group(1) if m else Path(filename).stem[:8]
+            v = tu.get("AUNITVALUE")
+            return f"{v[:4]}.{v[4:6]}" if len(v) >= 6 else v[:4]
+    m = re.search(r"(20\d{2})[._](\d{2})", filename)
+    return f"{m.group(1)}.{m.group(2)}" if m else Path(filename).stem[:8]
 
 
 # ──────────────────────────────────────────────────────────────
