@@ -69,7 +69,8 @@ def parse_document(raw: bytes) -> ET.Element:
     # 인코딩 선언 제거 후 문자열로 파싱 (선언과 실제 인코딩 불일치 대비)
     text = re.sub(r"<\?xml[^?]*\?>", "", text, count=1)
     # DART 원문은 엄밀한 XML이 아니라서 정리가 필요:
-    #  1) &cr; 같은 비표준 엔티티 → &amp;cr; (줄바꿈 표기)
+    #  1) &cr; (DART의 줄바꿈 표기) → 공백, 그 외 비표준 엔티티 → &amp;
+    text = text.replace("&cr;", " ")
     text = re.sub(r"&(?!lt;|gt;|amp;|quot;|apos;|#)", "&amp;", text)
     #  2) 본문 속 이스케이프 안 된 '<' (예: "< 로드맵 >", "<당사 포트폴리오>")
     #     실제 태그는 <영문자, </영문자, <!, <? 로만 시작한다.
