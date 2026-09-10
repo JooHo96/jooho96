@@ -5,15 +5,21 @@
     pip install requests openpyxl
 
     python hd_heavy_orders.py --api-key YOUR_DART_KEY
+    python hd_heavy_orders.py --api-key YOUR_DART_KEY --months 3
     python hd_heavy_orders.py --api-key YOUR_DART_KEY --from-year 2020
     python hd_heavy_orders.py --api-key YOUR_DART_KEY --year 2026
     python hd_heavy_orders.py --api-key YOUR_DART_KEY --companies HD현대중공업 삼성중공업
+    python hd_heavy_orders.py --api-key YOUR_DART_KEY --lookup-corps   # corp_code 확인
+
+corp_code는 검증된 기업(COMPANIES)은 그대로 쓰고, 그 외에는 DART corpCode.xml
+에서 이름으로 자동 조회한다 (corp_codes_cache.json 에 캐시).
 """
 
 import argparse
 import calendar
 import csv
 import io
+import json
 import re
 import time
 import zipfile
@@ -26,7 +32,8 @@ from openpyxl import load_workbook
 DART_BASE  = "https://opendart.fss.or.kr/api"
 SHEET_NAME = "뉴스수주"
 
-# 기업명 → DART corp_code (공식 코드)
+# 검증된 corp_code (--lookup-corps 로 확인한 값).
+# 여기 없는 기업은 corpCode.xml 에서 이름으로 자동 조회한다.
 COMPANIES = {
     "HD현대중공업":   "01390344",
     "한화오션":       "00111704",
@@ -35,7 +42,13 @@ COMPANIES = {
     "HD현대미포":     "00164621",
 }
 
-DEFAULT_COMPANIES = ["HD현대중공업", "한화오션", "HD한국조선해양", "삼성중공업"]
+DEFAULT_COMPANIES = [
+    "HD현대중공업", "한화오션", "HD한국조선해양", "삼성중공업",
+    "HD현대마린엔진", "한화엔진", "대한조선", "한국카본",
+    "동성화인텍", "STX엔진", "세진중공업",
+]
+
+CORP_CACHE_FILE = "corp_codes_cache.json"
 
 COL = {
     "A": 1,  "B": 2,  "C": 3,  "D": 4,  "E": 5,
@@ -112,40 +125,132 @@ VESSEL_MAP = [
     ("engine",     "선박용엔진"),
     ("발전기",     "선박용엔진"),
     ("발전설비",   "선박용엔진"),
+    ("추진기",     "선박용엔진"),
+    # 블록 / 기자재 (세진중공업 등)
+    ("데크하우스", "선박블록"),
+    ("deck house", "선박블록"),
+    ("선실",       "선박블록"),
+    ("블록",       "선박블록"),
     # 해양 단독 폴백 (마지막에 두어야 더 구체적인 것에 먼저 매칭)
     ("해양",       "해양"),
 ]
 
+# 기자재 키워드는 선종 키워드보다 먼저 판정해야 한다.
+# ('LNG운반선용 보냉재' 가 'LNG선'으로 잡히는 것 방지)
+VESSEL_MAP = [
+    ("보냉재",     "보냉재"),
+    ("초저온",     "보냉재"),
+    ("단열재",     "보냉재"),
+    ("단열",       "보냉재"),
+    ("insulation", "보냉재"),
+] + VESSEL_MAP
+
+# DART 등록명이 통용 사명과 다른 경우 (--lookup-corps 로 확인)
+CORP_ALIASES = {
+    "STX엔진":        ["STX엔진", "에스티엑스엔진"],
+    "HD현대마린엔진": ["HD현대마린엔진", "에이치디현대마린엔진", "STX중공업"],
+    "HD현대중공업":   ["HD현대중공업", "에이치디현대중공업"],
+    "HD한국조선해양": ["HD한국조선해양", "에이치디한국조선해양", "한국조선해양"],
+    "HD현대미포":     ["HD현대미포", "에이치디현대미포", "현대미포조선"],
+}
+
 
 # ── DART API ──────────────────────────────────────────────────────────────
 
-def lookup_corp_codes(api_key, names):
-    """corpCode.xml에서 기업명으로 corp_code 검색. 결과 출력 후 반환."""
+def fetch_corp_index(api_key, cache_path=CORP_CACHE_FILE, refresh=False):
+    """corpCode.xml 전체를 받아 [(corp_name, corp_code, stock_code), ...] 반환.
+    한 번 받으면 디스크에 캐시한다 (파일이 수 MB라 매번 받으면 느림)."""
     import xml.etree.ElementTree as ET
+
+    p = Path(cache_path)
+    if p.exists() and not refresh:
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    r = requests.get(f"{DART_BASE}/corpCode.xml",
+                     params={"crtfc_key": api_key}, timeout=120)
+    if r.content[:2] != b"PK":
+        raise RuntimeError(f"corpCode.xml 응답 이상: {r.text[:200]}")
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        raw = z.read(z.namelist()[0])
+    root = ET.fromstring(raw)
+
+    entries = []
+    for item in root.findall("list"):
+        entries.append([
+            (item.findtext("corp_name")  or "").strip(),
+            (item.findtext("corp_code")  or "").strip(),
+            (item.findtext("stock_code") or "").strip(),
+        ])
     try:
-        r = requests.get(f"{DART_BASE}/corpCode.xml",
-                         params={"crtfc_key": api_key}, timeout=60)
-        if r.content[:2] != b"PK":
-            print(f"[오류] corpCode.xml 응답 이상: {r.text[:200]}")
-            return {}
-        import zipfile, io as _io
-        with zipfile.ZipFile(_io.BytesIO(r.content)) as z:
-            raw = z.read(z.namelist()[0])
-        root = ET.fromstring(raw)
-        result = {}
-        for item in root.findall("list"):
-            corp_name = item.findtext("corp_name", "")
-            corp_code = item.findtext("corp_code", "")
-            stock_code = item.findtext("stock_code", "")
-            for tgt in names:
-                if tgt in corp_name:
-                    if corp_name not in result:
-                        result[corp_name] = (corp_code, stock_code)
-                        print(f"  {corp_name:25s}  corp_code={corp_code}  stock={stock_code}")
-        return result
+        p.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return entries
+
+
+def _norm_name(s):
+    return re.sub(r'[\s()（）㈜.]', '', s).upper()
+
+
+def _resolve_one(entries, name):
+    target = _norm_name(name)
+
+    exact, prefix, partial = [], [], []
+    for corp_name, corp_code, stock_code in entries:
+        n = _norm_name(corp_name)
+        if n == target:
+            exact.append((corp_name, corp_code, stock_code))
+        elif n.startswith(target):
+            prefix.append((corp_name, corp_code, stock_code))
+        elif target in n:
+            partial.append((corp_name, corp_code, stock_code))
+
+    for bucket in (exact, prefix, partial):
+        if not bucket:
+            continue
+        # 상장사 우선 → 이름 짧은 순
+        bucket.sort(key=lambda e: (0 if e[2] else 1, len(e[0])))
+        return bucket[0]
+    return None
+
+
+def resolve_corp_code(entries, name):
+    """기업명 → (corp_name, corp_code, stock_code). 못 찾으면 None.
+
+    상장사(stock_code 있음)를 우선하고, 그 다음 이름이 짧은 쪽을 택한다.
+    ('한화오션' 검색 시 '한화오션에코텍' 같은 자회사가 잡히는 것 방지)
+    통용 사명이 DART 등록명과 다르면 CORP_ALIASES 후보를 차례로 시도한다.
+    """
+    for cand in CORP_ALIASES.get(name, [name]):
+        hit = _resolve_one(entries, cand)
+        if hit:
+            return hit
+    return None
+
+
+def lookup_corp_codes(api_key, names, refresh=False):
+    """기업명 목록 → {입력명: (corp_name, corp_code, stock_code)}"""
+    try:
+        entries = fetch_corp_index(api_key, refresh=refresh)
     except Exception as e:
         print(f"[오류] corp_code 조회 실패: {e}")
         return {}
+
+    result = {}
+    for name in names:
+        hit = resolve_corp_code(entries, name)
+        if hit:
+            result[name] = hit
+            corp_name, corp_code, stock_code = hit
+            tag = f"stock={stock_code}" if stock_code else "비상장"
+            note = "" if _norm_name(corp_name) == _norm_name(name) else f"  ← '{name}'"
+            print(f"  {corp_name:20s}  corp_code={corp_code}  {tag}{note}")
+        else:
+            print(f"  [찾지 못함] {name}")
+    return result
 
 
 def get_list(api_key, bgn_de, end_de, corp_code=None):
@@ -1081,6 +1186,8 @@ def main():
                     help="수집 시작 연도 (기본: 2020)")
     ap.add_argument("--year",         type=int, default=0,
                     help="특정 연도만 수집 (예: --year 2026)")
+    ap.add_argument("--months",       type=int, default=0,
+                    help="최근 N개월만 수집 (예: --months 3)")
     ap.add_argument("--reference",    default="", help="크로스체크용 학습 엑셀")
     ap.add_argument("--csv-out",      default="", help="CSV 저장 경로 (생략 시 저장 안 함)")
     ap.add_argument("--xlsx-out",     default="조선사_수주.xlsx", help="XLSX 저장 경로")
@@ -1089,13 +1196,15 @@ def main():
     ap.add_argument("--amendments-only", action="store_true", help="정정공시만 저장")
     ap.add_argument("--lookup-corps", action="store_true",
                     help="DART에서 기업 corp_code 검색 후 종료 (코드 확인용)")
+    ap.add_argument("--refresh-corps", action="store_true",
+                    help="corp_code 캐시 무시하고 다시 받기")
     args = ap.parse_args()
 
     # corp_code 조회 모드
     if args.lookup_corps:
         search_names = args.companies if args.companies else list(COMPANIES.keys())
         print(f"DART corp_code 검색: {search_names}")
-        lookup_corp_codes(args.api_key, search_names)
+        lookup_corp_codes(args.api_key, search_names, refresh=args.refresh_corps)
         return
 
     # 학습 데이터 로드
@@ -1107,7 +1216,18 @@ def main():
     today = datetime.today()
 
     # 조회 구간 계산
-    if args.year:
+    if args.months:
+        m = today.month - args.months
+        y = today.year
+        while m <= 0:
+            m += 12
+            y -= 1
+        d = min(today.day, calendar.monthrange(y, m)[1])
+        start = datetime(y, m, d)
+        ranges = [(start.strftime("%Y%m%d"), today.strftime("%Y%m%d"))]
+        period_str = (f"최근 {args.months}개월 "
+                      f"({start.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')})")
+    elif args.year:
         ranges = [(f"{args.year}0101", f"{args.year}1231")]
         period_str = f"{args.year}년"
     else:
@@ -1120,14 +1240,23 @@ def main():
             cur = nxt + timedelta(days=1)
         period_str = f"{from_year}년~{today.year}년"
 
-    # 기업 목록 확인
+    # 기업 목록 확인: 검증된 코드 우선, 없으면 corpCode.xml 자동 조회
     target_corps = []
+    unknown = [n for n in args.companies if n not in COMPANIES]
+    resolved = {}
+    if unknown:
+        print(f"corp_code 자동 조회: {', '.join(unknown)}")
+        resolved = lookup_corp_codes(args.api_key, unknown, refresh=args.refresh_corps)
+        print()
+
     for name in args.companies:
-        code = COMPANIES.get(name)
-        if not code:
-            print(f"[경고] 알 수 없는 기업: {name}  (등록된 기업: {', '.join(COMPANIES.keys())})")
-            continue
-        target_corps.append((name, code))
+        if name in COMPANIES:
+            target_corps.append((name, COMPANIES[name]))
+        elif name in resolved:
+            corp_name, corp_code, _ = resolved[name]
+            target_corps.append((corp_name, corp_code))
+        else:
+            print(f"[경고] corp_code를 찾지 못해 건너뜀: {name}")
 
     if not target_corps:
         print("[오류] 수집할 기업이 없습니다."); return
